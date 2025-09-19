@@ -20,6 +20,7 @@ from src.data_loader import DataLoader
 from src.indicators import TechnicalIndicators
 from src.signal_generator import SignalGenerator
 from src.visualizer import ChartVisualizer
+from src.backtesting import BacktestEngine
 
 class TradingSignalEngine:
     """
@@ -38,6 +39,7 @@ class TradingSignalEngine:
         self.indicators = TechnicalIndicators()
         self.signal_generator = SignalGenerator()
         self.visualizer = ChartVisualizer()
+        self.backtest_engine = BacktestEngine()
         self.data = None
         
     def load_data(self, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
@@ -140,17 +142,18 @@ class TradingSignalEngine:
         print("Visualization completed!")
     
     def run_analysis(self, period: str = "1y", interval: str = "1d", 
-                    save_chart: bool = False) -> pd.DataFrame:
+                    save_chart: bool = False, run_backtest: bool = True) -> dict:
         """
-        Run complete analysis pipeline
+        Run complete analysis pipeline with backtesting
         
         Args:
             period (str): Data period
             interval (str): Data interval
             save_chart (bool): Whether to save the chart image
+            run_backtest (bool): Whether to run backtesting analysis
             
         Returns:
-            pd.DataFrame: Complete analysis with signals
+            dict: Complete analysis results including backtest data
         """
         print("=" * 50)
         print("XAUUSD TRADING SIGNAL ENGINE - PHASE 1.1")
@@ -179,11 +182,42 @@ class TradingSignalEngine:
         
         self.visualize_signals(chart_path)
         
-        print("=" * 50)
-        print("ANALYSIS COMPLETE!")
+        # Step 5: Run Backtesting (if requested)
+        backtest_results = None
+        backtest_chart_path = None
+        if run_backtest and len(data) > 30:
+            print("\n" + "=" * 50)
+            print("RUNNING BACKTESTING ANALYSIS")
+            print("=" * 50)
+            
+            # Extract signals for backtesting
+            signals = data['signal'] if 'signal' in data.columns else data.get('Signal', None)
+            if signals is not None:
+                backtest_results = self.backtest_engine.execute_backtest(data, signals)
+                self.backtest_engine.print_performance_report(backtest_results)
+                
+                # Create backtest performance charts
+                if save_chart:
+                    backtest_chart_path = f"charts/xauusd_backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    self.backtest_engine.create_performance_charts(backtest_results, backtest_chart_path)
+            else:
+                print("⚠️ No signals found for backtesting")
+        
+        print("\n" + "=" * 50)
+        print("COMPLETE ANALYSIS FINISHED!")
         print("=" * 50)
         
-        return data
+        # Return comprehensive results
+        results = {
+            'data': data,
+            'backtest_results': backtest_results,
+            'chart_path': chart_path,
+            'backtest_chart_path': backtest_chart_path,
+            'period': period,
+            'interval': interval
+        }
+        
+        return results
 
 def main():
     """
@@ -194,23 +228,40 @@ def main():
     
     # Run analysis with default parameters
     # You can modify these parameters as needed
-    data = engine.run_analysis(
+    results = engine.run_analysis(
         period="6mo",      # 6 months of data
         interval="1d",     # Daily intervals
-        save_chart=True    # Save the chart
+        save_chart=True,   # Save the chart
+        run_backtest=True  # Run backtesting
     )
     
-    if data is not None:
+    if results and results['data'] is not None:
+        data = results['data']
+        
         # Display some basic statistics
-        print("\nBASIC STATISTICS:")
+        print("\n" + "="*60)
+        print("FINAL ANALYSIS SUMMARY")
+        print("="*60)
         print(f"Total data points: {len(data)}")
         print(f"Date range: {data.index[0].date()} to {data.index[-1].date()}")
         
         # Count signals
-        buy_signals = len(data[data['signal'] == 1])
-        sell_signals = len(data[data['signal'] == -1])
-        print(f"Buy signals: {buy_signals}")
-        print(f"Sell signals: {sell_signals}")
+        signal_col = 'signal' if 'signal' in data.columns else 'Signal'
+        if signal_col in data.columns:
+            buy_signals = len(data[data[signal_col] == 1])
+            sell_signals = len(data[data[signal_col] == -1])
+            print(f"Buy signals: {buy_signals}")
+            print(f"Sell signals: {sell_signals}")
+        
+        # Display file paths
+        if results['chart_path']:
+            print(f"Signal chart saved: {results['chart_path']}")
+        if results['backtest_chart_path']:
+            print(f"Backtest chart saved: {results['backtest_chart_path']}")
+            
+        print("="*60)
+        print("✅ PHASE 1.4 BACKTESTING IMPLEMENTATION COMPLETE!")
+        print("="*60)
 
 if __name__ == "__main__":
     main()
