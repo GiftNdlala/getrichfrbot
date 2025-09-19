@@ -84,8 +84,33 @@ def init_live_stream():
 
 @app.route('/')
 def dashboard():
-    """Main dashboard page"""
-    return render_template('dashboard.html')
+    """Main dashboard page - Live Signals"""
+    return render_template('dashboard.html', page='live')
+
+@app.route('/live')
+def live_signals():
+    """Live Signals page"""
+    return render_template('dashboard.html', page='live')
+
+@app.route('/history')
+def signal_history():
+    """Signal History page"""
+    return render_template('dashboard.html', page='history')
+
+@app.route('/analytics') 
+def analytics():
+    """Analytics & Performance page"""
+    return render_template('dashboard.html', page='analytics')
+
+@app.route('/settings')
+def settings():
+    """Settings & Configuration page"""
+    return render_template('dashboard.html', page='settings')
+
+@app.route('/about')
+def about():
+    """About page"""
+    return render_template('dashboard.html', page='about')
 
 @app.route('/api/current_signal')
 def get_current_signal():
