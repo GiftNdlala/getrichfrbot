@@ -16,6 +16,7 @@ from dataclasses import dataclass, asdict
 
 from indicators import TechnicalIndicators
 from signal_generator import SignalGenerator
+from robust_data_source import RobustXAUUSDDataSource
 
 @dataclass
 class LiveSignal:
@@ -59,18 +60,19 @@ class LiveDataStream:
     Real-time data streaming and signal generation for XAUUSD
     """
     
-    def __init__(self, symbol: str = "GC=F", update_interval: int = 30):
+    def __init__(self, symbol: str = "XAUUSD", update_interval: int = 30):
         """
         Initialize live data streaming
         
         Args:
-            symbol (str): Yahoo Finance symbol for Gold (GC=F)
+            symbol (str): Symbol for Gold (XAUUSD)
             update_interval (int): Update interval in seconds
         """
-        self.symbol = symbol  # GC=F for Gold futures
+        self.symbol = symbol  # XAUUSD for Gold
         self.update_interval = update_interval
         self.indicators = TechnicalIndicators()
         self.signal_generator = SignalGenerator()
+        self.data_source = RobustXAUUSDDataSource()  # Use robust data source
         
         # Data storage
         self.current_data = pd.DataFrame()
@@ -88,10 +90,9 @@ class LiveDataStream:
         """Fetch initial historical data for indicator calculations"""
         try:
             print("📊 Fetching initial historical data...")
-            ticker = yf.Ticker(self.symbol)
             
-            # Get 1 year of daily data for indicator calculations
-            data = ticker.history(period="1y", interval="1d")
+            # Use robust data source
+            data = self.data_source.get_historical_data(days=365)
             
             if data.empty:
                 print("⚠️ No data received, using mock data")
@@ -100,7 +101,7 @@ class LiveDataStream:
             # Calculate all indicators on historical data
             data = self.indicators.calculate_all_indicators(data)
             
-            print(f"✅ Loaded {len(data)} historical data points")
+            print(f"✅ Loaded {len(data)} historical data points from {self.data_source.data_source}")
             return data
             
         except Exception as e:
@@ -141,24 +142,18 @@ class LiveDataStream:
     def _fetch_current_quote(self) -> Optional[Dict]:
         """Fetch current real-time quote"""
         try:
-            ticker = yf.Ticker(self.symbol)
+            # Use robust data source for current price
+            current_data = self.data_source.get_current_price()
             
-            # Get current quote
-            info = ticker.info
-            history = ticker.history(period="2d", interval="1m")
-            
-            if history.empty:
-                return None
-            
-            current_price = history['Close'].iloc[-1]
-            prev_close = history['Close'].iloc[-2] if len(history) > 1 else current_price
-            
-            return {
-                'price': float(current_price),
-                'prev_close': float(prev_close),
-                'timestamp': datetime.now(),
-                'volume': float(history['Volume'].iloc[-1]) if not history['Volume'].empty else 0
-            }
+            if current_data:
+                return {
+                    'price': current_data['price'],
+                    'prev_close': current_data['prev_close'],
+                    'timestamp': current_data['timestamp'],
+                    'volume': current_data['volume']
+                }
+            else:
+                return self._generate_mock_quote()
             
         except Exception as e:
             print(f"⚠️ Error fetching current quote: {e}")
