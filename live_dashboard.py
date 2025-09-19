@@ -66,9 +66,14 @@ def init_live_stream():
         }
         
         # Add to history (keep last 10)
-        signal_history.append(current_signal_data.copy())
-        if len(signal_history) > 10:
-            signal_history.pop(0)
+        try:
+            signal_history.append(current_signal_data.copy())
+            if len(signal_history) > 10:
+                signal_history.pop(0)
+        except Exception as e:
+            print(f"⚠️ History update error: {e}")
+            # Reinitialize signal_history if corrupted
+            signal_history = [current_signal_data.copy()]
         
         # Print signal update with alert categorization
         if signal.signal != 0:
