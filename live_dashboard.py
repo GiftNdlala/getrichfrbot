@@ -44,6 +44,12 @@ def init_live_stream():
             'price_change': signal.price_change,
             'price_change_pct': signal.price_change_pct,
             
+            # Alert Category Data
+            'alert_level': signal.alert_level,
+            'alert_color': signal.alert_color,
+            'target_pips': signal.target_pips,
+            'success_rate': signal.success_rate,
+            
             # Risk Management Data
             'entry_price': signal.entry_price,
             'stop_loss': signal.stop_loss,
@@ -64,9 +70,11 @@ def init_live_stream():
         if len(signal_history) > 10:
             signal_history.pop(0)
         
-        # Print signal update
+        # Print signal update with alert categorization
         if signal.signal != 0:
-            print(f"🎯 {signal.signal_type} SIGNAL: ${signal.current_price:.2f} (Confidence: {signal.confidence:.1f}%)")
+            alert_emoji = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}.get(signal.alert_level, '⭕')
+            print(f"🎯 {signal.signal_type} SIGNAL: ${signal.current_price:.2f} | {alert_emoji} {signal.alert_level} ALERT")
+            print(f"   Target: {signal.target_pips} pips | Success Rate: {signal.success_rate:.1f}% | Confidence: {signal.confidence:.1f}%")
     
     # Create and start live stream
     live_stream = LiveDataStream(symbol="GC=F", update_interval=30)
@@ -228,6 +236,65 @@ def create_dashboard_template():
             background: #FF9800;
             color: white;
             box-shadow: 0 0 20px rgba(255, 152, 0, 0.5);
+        }
+        
+        .alert-section {
+            margin-top: 15px;
+            text-align: center;
+        }
+        
+        .alert-badge {
+            display: inline-block;
+            padding: 8px 20px;
+            border-radius: 25px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .alert-badge.HIGH {
+            background: #f44336;
+            color: white;
+            box-shadow: 0 0 15px rgba(244, 67, 54, 0.6);
+            animation: pulse-red 2s infinite;
+        }
+        
+        .alert-badge.MEDIUM {
+            background: #FF9800;
+            color: white;
+            box-shadow: 0 0 15px rgba(255, 152, 0, 0.6);
+            animation: pulse-orange 2s infinite;
+        }
+        
+        .alert-badge.LOW {
+            background: #4CAF50;
+            color: white;
+            box-shadow: 0 0 15px rgba(76, 175, 80, 0.6);
+            animation: pulse-green 2s infinite;
+        }
+        
+        @keyframes pulse-red {
+            0%, 100% { box-shadow: 0 0 15px rgba(244, 67, 54, 0.6); }
+            50% { box-shadow: 0 0 25px rgba(244, 67, 54, 0.9); }
+        }
+        
+        @keyframes pulse-orange {
+            0%, 100% { box-shadow: 0 0 15px rgba(255, 152, 0, 0.6); }
+            50% { box-shadow: 0 0 25px rgba(255, 152, 0, 0.9); }
+        }
+        
+        @keyframes pulse-green {
+            0%, 100% { box-shadow: 0 0 15px rgba(76, 175, 80, 0.6); }
+            50% { box-shadow: 0 0 25px rgba(76, 175, 80, 0.9); }
+        }
+        
+        .alert-details {
+            font-size: 0.95rem;
+            opacity: 0.9;
+            color: #FFD700;
+            font-weight: 500;
         }
         
         .confidence {
@@ -460,6 +527,13 @@ def create_dashboard_template():
                 
                 <div class="signal-section">
                     <div class="signal-badge" id="signal-badge">HOLD</div>
+                    <div class="alert-section" id="alert-section" style="display: none;">
+                        <div class="alert-badge" id="alert-badge">LOW ALERT</div>
+                        <div class="alert-details">
+                            <span id="target-pips-text">15 pips target</span> • 
+                            <span id="success-rate-text">85% success rate</span>
+                        </div>
+                    </div>
                     <div class="confidence">
                         Confidence: <span id="confidence-text">0%</span>
                         <div class="confidence-bar">
@@ -482,17 +556,17 @@ def create_dashboard_template():
                             <div class="trade-value" id="stop-loss">--</div>
                         </div>
                         <div class="trade-card take-profit">
-                            <div class="trade-label">🎯 Take Profit 1</div>
+                            <div class="trade-label" id="tp1-label">🎯 Take Profit 1</div>
                             <div class="trade-value" id="take-profit-1">--</div>
                             <div class="trade-sub">Profit: <span id="profit-tp1">$--</span></div>
                         </div>
                         <div class="trade-card take-profit">
-                            <div class="trade-label">🎯 Take Profit 2</div>
+                            <div class="trade-label" id="tp2-label">🎯 Take Profit 2</div>
                             <div class="trade-value" id="take-profit-2">--</div>
                             <div class="trade-sub">Profit: <span id="profit-tp2">$--</span></div>
                         </div>
                         <div class="trade-card take-profit">
-                            <div class="trade-label">🎯 Take Profit 3</div>
+                            <div class="trade-label" id="tp3-label">🎯 Take Profit 3</div>
                             <div class="trade-value" id="take-profit-3">--</div>
                             <div class="trade-sub">Profit: <span id="profit-tp3">$--</span></div>
                         </div>
@@ -587,6 +661,21 @@ def create_dashboard_template():
             signalBadge.textContent = data.signal_type;
             signalBadge.className = `signal-badge ${data.signal_type}`;
             
+            // Update alert section
+            const alertSection = document.getElementById('alert-section');
+            if (data.signal_type !== 'HOLD') {
+                alertSection.style.display = 'block';
+                
+                const alertBadge = document.getElementById('alert-badge');
+                alertBadge.textContent = `${data.alert_level} ALERT`;
+                alertBadge.className = `alert-badge ${data.alert_level}`;
+                
+                document.getElementById('target-pips-text').textContent = `${data.target_pips} pips target`;
+                document.getElementById('success-rate-text').textContent = `${data.success_rate.toFixed(1)}% success rate`;
+            } else {
+                alertSection.style.display = 'none';
+            }
+            
             // Update confidence
             document.getElementById('confidence-text').textContent = `${data.confidence.toFixed(1)}%`;
             document.getElementById('confidence-fill').style.width = `${data.confidence}%`;
@@ -609,6 +698,12 @@ def create_dashboard_template():
                 document.getElementById('take-profit-2').textContent = `$${data.take_profit_2.toFixed(2)}`;
                 document.getElementById('take-profit-3').textContent = `$${data.take_profit_3.toFixed(2)}`;
                 document.getElementById('risk-reward').textContent = `1:${data.risk_reward_ratio.toFixed(1)}`;
+                
+                // Update take profit labels with pip targets
+                const targetPips = data.target_pips;
+                document.getElementById('tp1-label').textContent = `🎯 TP1 (${targetPips}p)`;
+                document.getElementById('tp2-label').textContent = `🎯 TP2 (${Math.round(targetPips * 1.5)}p)`;
+                document.getElementById('tp3-label').textContent = `🎯 TP3 (${targetPips * 2}p)`;
                 
                 // Update potential profits
                 document.getElementById('profit-tp1').textContent = `$${data.potential_profit_tp1.toFixed(0)}`;

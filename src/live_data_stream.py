@@ -19,7 +19,7 @@ from signal_generator import SignalGenerator
 
 @dataclass
 class LiveSignal:
-    """Data class for live trading signals with risk management"""
+    """Data class for live trading signals with risk management and alert categorization"""
     timestamp: str
     symbol: str
     current_price: float
@@ -33,6 +33,12 @@ class LiveSignal:
     sma_50: float
     price_change: float
     price_change_pct: float
+    
+    # Signal Alert Category System
+    alert_level: str  # "HIGH", "MEDIUM", "LOW", "HOLD"
+    alert_color: str  # Color code for UI
+    target_pips: int  # Target pips for this signal category
+    success_rate: float  # Expected success rate percentage
     
     # Risk Management Details
     entry_price: float
@@ -194,8 +200,93 @@ class LiveDataStream:
         # Recalculate indicators
         self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
     
-    def _calculate_risk_management(self, current_price: float, signal: int, latest_data: pd.Series) -> Dict:
-        """Calculate comprehensive risk management parameters"""
+    def _determine_signal_category(self, confidence: float, atr_value: float, signal: int, latest_data: pd.Series) -> Dict:
+        """Determine signal alert category based on confidence and market conditions"""
+        
+        # Default values for HOLD
+        if signal == 0:
+            return {
+                'alert_level': 'HOLD',
+                'alert_color': '#FF9800',  # Orange
+                'target_pips': 0,
+                'success_rate': 50.0
+            }
+        
+        try:
+            # Get additional indicators for categorization
+            rsi = latest_data.get('RSI_14', 50)
+            macd = latest_data.get('MACD_12_26', 0)
+            macd_signal = latest_data.get('MACD_Signal_9', 0)
+            
+            # Calculate indicator strength
+            indicator_strength = 0
+            
+            # RSI strength (0-3 points)
+            if signal == 1:  # BUY
+                if rsi < 30:  # Oversold (good for buy)
+                    indicator_strength += 3
+                elif rsi < 40:
+                    indicator_strength += 2
+                elif rsi < 50:
+                    indicator_strength += 1
+            else:  # SELL
+                if rsi > 70:  # Overbought (good for sell)
+                    indicator_strength += 3
+                elif rsi > 60:
+                    indicator_strength += 2
+                elif rsi > 50:
+                    indicator_strength += 1
+            
+            # MACD strength (0-2 points)
+            macd_divergence = abs(macd - macd_signal)
+            if macd_divergence > atr_value * 0.5:  # Strong MACD signal
+                indicator_strength += 2
+            elif macd_divergence > atr_value * 0.2:
+                indicator_strength += 1
+            
+            # Volatility factor (higher volatility = potentially higher rewards)
+            volatility_factor = min(atr_value / 20.0, 2.0)  # Normalize ATR
+            
+            # Combined score for categorization
+            total_score = confidence + (indicator_strength * 10) + (volatility_factor * 10)
+            
+            # Determine category based on total score
+            if total_score >= 85 and confidence >= 75:
+                # HIGH ALERT: 40-50 pips target
+                return {
+                    'alert_level': 'HIGH',
+                    'alert_color': '#f44336',  # Red - High attention
+                    'target_pips': int(45 + (volatility_factor * 5)),  # 40-50 pips
+                    'success_rate': min(confidence * 0.9, 85.0)  # Slightly lower success due to higher target
+                }
+            elif total_score >= 70 and confidence >= 60:
+                # MEDIUM ALERT: 20-30 pips target
+                return {
+                    'alert_level': 'MEDIUM',
+                    'alert_color': '#FF9800',  # Orange - Medium attention
+                    'target_pips': int(25 + (volatility_factor * 5)),  # 20-30 pips
+                    'success_rate': min(confidence * 0.95, 80.0)  # Balanced success rate
+                }
+            else:
+                # LOW ALERT: 10-15 pips target (Conservative, highest success rate)
+                return {
+                    'alert_level': 'LOW',
+                    'alert_color': '#4CAF50',  # Green - Safe/Conservative
+                    'target_pips': int(12 + (volatility_factor * 3)),  # 10-15 pips
+                    'success_rate': min(confidence * 1.1, 95.0)  # Highest success rate
+                }
+                
+        except Exception as e:
+            print(f"⚠️ Error determining signal category: {e}")
+            return {
+                'alert_level': 'LOW',
+                'alert_color': '#4CAF50',
+                'target_pips': 12,
+                'success_rate': 70.0
+            }
+
+    def _calculate_risk_management(self, current_price: float, signal: int, latest_data: pd.Series, alert_category: Dict) -> Dict:
+        """Calculate comprehensive risk management parameters based on alert category"""
         
         # Default values
         risk_mgmt = {
@@ -221,24 +312,40 @@ class LiveDataStream:
             
             risk_mgmt['atr_value'] = float(atr_value)
             
-            # Calculate entry price (slight delay for better entry)
+            # Get target pips from alert category
+            target_pips = alert_category.get('target_pips', 15)
+            
             if signal == 1:  # BUY signal
-                entry_price = current_price + (atr_value * 0.1)  # Enter slightly above current
-                stop_loss = current_price - (atr_value * 1.5)    # 1.5 ATR stop loss
+                entry_price = current_price + (atr_value * 0.05)  # Small entry buffer
                 
-                # Multiple take profit levels
-                take_profit_1 = current_price + (atr_value * 2.0)  # 2:1 risk/reward
-                take_profit_2 = current_price + (atr_value * 3.0)  # 3:1 risk/reward  
-                take_profit_3 = current_price + (atr_value * 4.0)  # 4:1 risk/reward
+                # Adaptive stop loss based on alert level
+                if alert_category['alert_level'] == 'HIGH':
+                    stop_loss = current_price - (atr_value * 2.0)  # Wider stop for high targets
+                elif alert_category['alert_level'] == 'MEDIUM':
+                    stop_loss = current_price - (atr_value * 1.5)  # Balanced stop
+                else:  # LOW
+                    stop_loss = current_price - (atr_value * 1.0)  # Tight stop for conservative trades
+                
+                # Take profit levels based on target pips
+                take_profit_1 = current_price + target_pips  # Primary target
+                take_profit_2 = current_price + (target_pips * 1.5)  # Extended target
+                take_profit_3 = current_price + (target_pips * 2.0)  # Maximum target
                 
             elif signal == -1:  # SELL signal
-                entry_price = current_price - (atr_value * 0.1)  # Enter slightly below current
-                stop_loss = current_price + (atr_value * 1.5)    # 1.5 ATR stop loss
+                entry_price = current_price - (atr_value * 0.05)  # Small entry buffer
                 
-                # Multiple take profit levels
-                take_profit_1 = current_price - (atr_value * 2.0)  # 2:1 risk/reward
-                take_profit_2 = current_price - (atr_value * 3.0)  # 3:1 risk/reward
-                take_profit_3 = current_price - (atr_value * 4.0)  # 4:1 risk/reward
+                # Adaptive stop loss based on alert level
+                if alert_category['alert_level'] == 'HIGH':
+                    stop_loss = current_price + (atr_value * 2.0)  # Wider stop for high targets
+                elif alert_category['alert_level'] == 'MEDIUM':
+                    stop_loss = current_price + (atr_value * 1.5)  # Balanced stop
+                else:  # LOW
+                    stop_loss = current_price + (atr_value * 1.0)  # Tight stop for conservative trades
+                
+                # Take profit levels based on target pips
+                take_profit_1 = current_price - target_pips  # Primary target
+                take_profit_2 = current_price - (target_pips * 1.5)  # Extended target
+                take_profit_3 = current_price - (target_pips * 2.0)  # Maximum target
                 
             else:  # HOLD signal
                 entry_price = current_price
@@ -255,9 +362,18 @@ class LiveDataStream:
             else:
                 risk_reward_ratio = 1.0
             
-            # Position sizing (2% risk rule)
+            # Adaptive position sizing based on alert level
             account_balance = 10000  # Assume $10K account
-            risk_per_trade = account_balance * 0.02  # 2% risk
+            
+            # Risk percentage based on alert level
+            if alert_category['alert_level'] == 'HIGH':
+                risk_percentage = 0.015  # 1.5% for high-risk, high-reward trades
+            elif alert_category['alert_level'] == 'MEDIUM':
+                risk_percentage = 0.02   # 2.0% for medium trades
+            else:  # LOW
+                risk_percentage = 0.025  # 2.5% for conservative, high-success trades
+            
+            risk_per_trade = account_balance * risk_percentage
             
             if signal != 0:
                 risk_per_share = abs(entry_price - stop_loss)
@@ -265,8 +381,8 @@ class LiveDataStream:
                     position_size_dollars = risk_per_trade / risk_per_share
                     position_size_percent = (position_size_dollars / account_balance) * 100
                 else:
-                    position_size_percent = 2.0
-                    position_size_dollars = account_balance * 0.02
+                    position_size_percent = risk_percentage * 100
+                    position_size_dollars = account_balance * risk_percentage
             else:
                 position_size_percent = 0.0
                 position_size_dollars = 0.0
@@ -304,7 +420,7 @@ class LiveDataStream:
         return risk_mgmt
 
     def _generate_live_signal(self, current_quote: Dict) -> LiveSignal:
-        """Generate live trading signal from current data"""
+        """Generate live trading signal with categorized alerts and risk management"""
         
         # Get latest indicator values
         latest_data = self.historical_data.iloc[-1]
@@ -315,6 +431,12 @@ class LiveDataStream:
         
         # Calculate confidence based on indicator alignment
         confidence = self._calculate_confidence(latest_data, current_signal)
+        
+        # Get ATR for alert categorization
+        atr_value = latest_data.get('ATR_14', 20.0)
+        
+        # Determine signal alert category
+        alert_category = self._determine_signal_category(confidence, atr_value, current_signal, latest_data)
         
         # Determine signal type
         if current_signal == 1:
@@ -328,8 +450,8 @@ class LiveDataStream:
         price_change = current_quote['price'] - current_quote['prev_close']
         price_change_pct = (price_change / current_quote['prev_close']) * 100
         
-        # Calculate risk management parameters
-        risk_mgmt = self._calculate_risk_management(current_quote['price'], current_signal, latest_data)
+        # Calculate risk management parameters with alert category
+        risk_mgmt = self._calculate_risk_management(current_quote['price'], current_signal, latest_data, alert_category)
         
         return LiveSignal(
             timestamp=current_quote['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
@@ -345,6 +467,12 @@ class LiveDataStream:
             sma_50=float(latest_data.get('SMA_50', current_quote['price'])),
             price_change=price_change,
             price_change_pct=price_change_pct,
+            
+            # Alert Categorization
+            alert_level=alert_category['alert_level'],
+            alert_color=alert_category['alert_color'],
+            target_pips=alert_category['target_pips'],
+            success_rate=alert_category['success_rate'],
             
             # Risk Management Parameters
             entry_price=risk_mgmt['entry_price'],
@@ -478,16 +606,27 @@ class LiveDataStream:
 # Example usage
 if __name__ == "__main__":
     def signal_callback(signal: LiveSignal):
+        # Get alert emoji based on level
+        alert_emoji = {
+            'HIGH': '🔴',
+            'MEDIUM': '🟡', 
+            'LOW': '🟢',
+            'HOLD': '⭕'
+        }.get(signal.alert_level, '⭕')
+        
         print(f"🎯 NEW SIGNAL: {signal.signal_type} | ${signal.current_price:.2f} | Confidence: {signal.confidence:.1f}%")
+        print(f"{alert_emoji} ALERT LEVEL: {signal.alert_level} | Target: {signal.target_pips} pips | Success Rate: {signal.success_rate:.1f}%")
+        
         if signal.signal != 0:
             print(f"📊 RSI: {signal.rsi:.1f} | MACD: {signal.macd:.2f} | Price Change: {signal.price_change_pct:+.2f}%")
             print(f"📋 TRADE DETAILS:")
             print(f"   🎯 Entry: ${signal.entry_price:.2f}")
             print(f"   🛑 Stop Loss: ${signal.stop_loss:.2f}")
-            print(f"   💰 Take Profit 1: ${signal.take_profit_1:.2f} (${signal.potential_profit_tp1:.0f} profit)")
-            print(f"   💰 Take Profit 2: ${signal.take_profit_2:.2f} (${signal.potential_profit_tp2:.0f} profit)")
-            print(f"   💰 Take Profit 3: ${signal.take_profit_3:.2f} (${signal.potential_profit_tp3:.0f} profit)")
+            print(f"   💰 TP1 ({signal.target_pips}p): ${signal.take_profit_1:.2f} (${signal.potential_profit_tp1:.0f} profit)")
+            print(f"   💰 TP2 ({signal.target_pips*1.5:.0f}p): ${signal.take_profit_2:.2f} (${signal.potential_profit_tp2:.0f} profit)")
+            print(f"   💰 TP3 ({signal.target_pips*2:.0f}p): ${signal.take_profit_3:.2f} (${signal.potential_profit_tp3:.0f} profit)")
             print(f"   📊 Risk/Reward: 1:{signal.risk_reward_ratio:.1f} | Position Size: {signal.position_size_percent:.1f}%")
+            print("-" * 80)
     
     # Create and start live stream
     stream = LiveDataStream(symbol="GC=F", update_interval=30)
