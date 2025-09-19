@@ -71,12 +71,12 @@ def start_live_dashboard():
             sys.path.insert(0, current_dir)
         
         # Import and start dashboard
-        from live_dashboard import app, init_live_stream, create_dashboard_template
+        from live_dashboard import app, init_live_stream, ensure_professional_template
         
-        print("🔧 Setting up dashboard...")
-        create_dashboard_template()
+        print("🔧 Setting up professional dashboard...")
+        ensure_professional_template()
         
-        print("📡 Initializing live data stream...")
+        print("📡 Initializing live data stream with REAL market data...")
         init_live_stream()
         
         print("✅ Starting web server...")
