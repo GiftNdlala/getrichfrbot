@@ -19,7 +19,7 @@ from signal_generator import SignalGenerator
 
 @dataclass
 class LiveSignal:
-    """Data class for live trading signals"""
+    """Data class for live trading signals with risk management"""
     timestamp: str
     symbol: str
     current_price: float
@@ -33,6 +33,20 @@ class LiveSignal:
     sma_50: float
     price_change: float
     price_change_pct: float
+    
+    # Risk Management Details
+    entry_price: float
+    stop_loss: float
+    take_profit_1: float
+    take_profit_2: float
+    take_profit_3: float
+    risk_reward_ratio: float
+    atr_value: float
+    position_size_percent: float
+    risk_amount_dollars: float
+    potential_profit_tp1: float
+    potential_profit_tp2: float
+    potential_profit_tp3: float
 
 class LiveDataStream:
     """
@@ -180,6 +194,115 @@ class LiveDataStream:
         # Recalculate indicators
         self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
     
+    def _calculate_risk_management(self, current_price: float, signal: int, latest_data: pd.Series) -> Dict:
+        """Calculate comprehensive risk management parameters"""
+        
+        # Default values
+        risk_mgmt = {
+            'entry_price': current_price,
+            'stop_loss': current_price,
+            'take_profit_1': current_price,
+            'take_profit_2': current_price, 
+            'take_profit_3': current_price,
+            'risk_reward_ratio': 1.0,
+            'atr_value': 20.0,
+            'position_size_percent': 2.0,
+            'risk_amount_dollars': 200.0,
+            'potential_profit_tp1': 0.0,
+            'potential_profit_tp2': 0.0,
+            'potential_profit_tp3': 0.0
+        }
+        
+        try:
+            # Get ATR for volatility-based stops
+            atr_value = latest_data.get('ATR_14', 20.0)  # Default to $20 for gold
+            if pd.isna(atr_value) or atr_value <= 0:
+                atr_value = 20.0
+            
+            risk_mgmt['atr_value'] = float(atr_value)
+            
+            # Calculate entry price (slight delay for better entry)
+            if signal == 1:  # BUY signal
+                entry_price = current_price + (atr_value * 0.1)  # Enter slightly above current
+                stop_loss = current_price - (atr_value * 1.5)    # 1.5 ATR stop loss
+                
+                # Multiple take profit levels
+                take_profit_1 = current_price + (atr_value * 2.0)  # 2:1 risk/reward
+                take_profit_2 = current_price + (atr_value * 3.0)  # 3:1 risk/reward  
+                take_profit_3 = current_price + (atr_value * 4.0)  # 4:1 risk/reward
+                
+            elif signal == -1:  # SELL signal
+                entry_price = current_price - (atr_value * 0.1)  # Enter slightly below current
+                stop_loss = current_price + (atr_value * 1.5)    # 1.5 ATR stop loss
+                
+                # Multiple take profit levels
+                take_profit_1 = current_price - (atr_value * 2.0)  # 2:1 risk/reward
+                take_profit_2 = current_price - (atr_value * 3.0)  # 3:1 risk/reward
+                take_profit_3 = current_price - (atr_value * 4.0)  # 4:1 risk/reward
+                
+            else:  # HOLD signal
+                entry_price = current_price
+                stop_loss = current_price
+                take_profit_1 = current_price
+                take_profit_2 = current_price
+                take_profit_3 = current_price
+            
+            # Calculate risk/reward ratio
+            if signal != 0:
+                risk_amount = abs(entry_price - stop_loss)
+                reward_amount = abs(take_profit_1 - entry_price)
+                risk_reward_ratio = reward_amount / risk_amount if risk_amount > 0 else 1.0
+            else:
+                risk_reward_ratio = 1.0
+            
+            # Position sizing (2% risk rule)
+            account_balance = 10000  # Assume $10K account
+            risk_per_trade = account_balance * 0.02  # 2% risk
+            
+            if signal != 0:
+                risk_per_share = abs(entry_price - stop_loss)
+                if risk_per_share > 0:
+                    position_size_dollars = risk_per_trade / risk_per_share
+                    position_size_percent = (position_size_dollars / account_balance) * 100
+                else:
+                    position_size_percent = 2.0
+                    position_size_dollars = account_balance * 0.02
+            else:
+                position_size_percent = 0.0
+                position_size_dollars = 0.0
+            
+            # Calculate potential profits
+            if signal == 1:  # BUY
+                potential_profit_tp1 = (take_profit_1 - entry_price) * (position_size_dollars / entry_price)
+                potential_profit_tp2 = (take_profit_2 - entry_price) * (position_size_dollars / entry_price)
+                potential_profit_tp3 = (take_profit_3 - entry_price) * (position_size_dollars / entry_price)
+            elif signal == -1:  # SELL
+                potential_profit_tp1 = (entry_price - take_profit_1) * (position_size_dollars / entry_price)
+                potential_profit_tp2 = (entry_price - take_profit_2) * (position_size_dollars / entry_price)
+                potential_profit_tp3 = (entry_price - take_profit_3) * (position_size_dollars / entry_price)
+            else:
+                potential_profit_tp1 = potential_profit_tp2 = potential_profit_tp3 = 0.0
+            
+            # Update risk management dictionary
+            risk_mgmt.update({
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit_1': take_profit_1,
+                'take_profit_2': take_profit_2,
+                'take_profit_3': take_profit_3,
+                'risk_reward_ratio': risk_reward_ratio,
+                'position_size_percent': min(position_size_percent, 10.0),  # Cap at 10%
+                'risk_amount_dollars': min(risk_per_trade, 500),  # Cap at $500
+                'potential_profit_tp1': potential_profit_tp1,
+                'potential_profit_tp2': potential_profit_tp2,
+                'potential_profit_tp3': potential_profit_tp3
+            })
+            
+        except Exception as e:
+            print(f"⚠️ Error calculating risk management: {e}")
+        
+        return risk_mgmt
+
     def _generate_live_signal(self, current_quote: Dict) -> LiveSignal:
         """Generate live trading signal from current data"""
         
@@ -187,8 +310,8 @@ class LiveDataStream:
         latest_data = self.historical_data.iloc[-1]
         
         # Generate signal using signal generator
-        signals = self.signal_generator.generate_signals(self.historical_data.tail(50))
-        current_signal = signals.iloc[-1] if not signals.empty else 0
+        signal_data = self.signal_generator.generate_all_signals(self.historical_data.tail(50))
+        current_signal = signal_data['signal'].iloc[-1] if 'signal' in signal_data.columns else 0
         
         # Calculate confidence based on indicator alignment
         confidence = self._calculate_confidence(latest_data, current_signal)
@@ -205,6 +328,9 @@ class LiveDataStream:
         price_change = current_quote['price'] - current_quote['prev_close']
         price_change_pct = (price_change / current_quote['prev_close']) * 100
         
+        # Calculate risk management parameters
+        risk_mgmt = self._calculate_risk_management(current_quote['price'], current_signal, latest_data)
+        
         return LiveSignal(
             timestamp=current_quote['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
             symbol=self.symbol,
@@ -218,7 +344,21 @@ class LiveDataStream:
             sma_20=float(latest_data.get('SMA_20', current_quote['price'])),
             sma_50=float(latest_data.get('SMA_50', current_quote['price'])),
             price_change=price_change,
-            price_change_pct=price_change_pct
+            price_change_pct=price_change_pct,
+            
+            # Risk Management Parameters
+            entry_price=risk_mgmt['entry_price'],
+            stop_loss=risk_mgmt['stop_loss'],
+            take_profit_1=risk_mgmt['take_profit_1'],
+            take_profit_2=risk_mgmt['take_profit_2'],
+            take_profit_3=risk_mgmt['take_profit_3'],
+            risk_reward_ratio=risk_mgmt['risk_reward_ratio'],
+            atr_value=risk_mgmt['atr_value'],
+            position_size_percent=risk_mgmt['position_size_percent'],
+            risk_amount_dollars=risk_mgmt['risk_amount_dollars'],
+            potential_profit_tp1=risk_mgmt['potential_profit_tp1'],
+            potential_profit_tp2=risk_mgmt['potential_profit_tp2'],
+            potential_profit_tp3=risk_mgmt['potential_profit_tp3']
         )
     
     def _calculate_confidence(self, latest_data: pd.Series, signal: int) -> float:
@@ -341,6 +481,13 @@ if __name__ == "__main__":
         print(f"🎯 NEW SIGNAL: {signal.signal_type} | ${signal.current_price:.2f} | Confidence: {signal.confidence:.1f}%")
         if signal.signal != 0:
             print(f"📊 RSI: {signal.rsi:.1f} | MACD: {signal.macd:.2f} | Price Change: {signal.price_change_pct:+.2f}%")
+            print(f"📋 TRADE DETAILS:")
+            print(f"   🎯 Entry: ${signal.entry_price:.2f}")
+            print(f"   🛑 Stop Loss: ${signal.stop_loss:.2f}")
+            print(f"   💰 Take Profit 1: ${signal.take_profit_1:.2f} (${signal.potential_profit_tp1:.0f} profit)")
+            print(f"   💰 Take Profit 2: ${signal.take_profit_2:.2f} (${signal.potential_profit_tp2:.0f} profit)")
+            print(f"   💰 Take Profit 3: ${signal.take_profit_3:.2f} (${signal.potential_profit_tp3:.0f} profit)")
+            print(f"   📊 Risk/Reward: 1:{signal.risk_reward_ratio:.1f} | Position Size: {signal.position_size_percent:.1f}%")
     
     # Create and start live stream
     stream = LiveDataStream(symbol="GC=F", update_interval=30)

@@ -42,7 +42,21 @@ def init_live_stream():
             'sma_20': signal.sma_20,
             'sma_50': signal.sma_50,
             'price_change': signal.price_change,
-            'price_change_pct': signal.price_change_pct
+            'price_change_pct': signal.price_change_pct,
+            
+            # Risk Management Data
+            'entry_price': signal.entry_price,
+            'stop_loss': signal.stop_loss,
+            'take_profit_1': signal.take_profit_1,
+            'take_profit_2': signal.take_profit_2,
+            'take_profit_3': signal.take_profit_3,
+            'risk_reward_ratio': signal.risk_reward_ratio,
+            'atr_value': signal.atr_value,
+            'position_size_percent': signal.position_size_percent,
+            'risk_amount_dollars': signal.risk_amount_dollars,
+            'potential_profit_tp1': signal.potential_profit_tp1,
+            'potential_profit_tp2': signal.potential_profit_tp2,
+            'potential_profit_tp3': signal.potential_profit_tp3
         }
         
         # Add to history (keep last 10)
@@ -261,6 +275,102 @@ def create_dashboard_template():
             font-weight: bold;
         }
         
+        .trade-details {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 215, 0, 0.3);
+        }
+        
+        .trade-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .trade-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 15px;
+            text-align: center;
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+        }
+        
+        .trade-card.entry {
+            border-color: rgba(76, 175, 80, 0.5);
+            background: rgba(76, 175, 80, 0.1);
+        }
+        
+        .trade-card.stop-loss {
+            border-color: rgba(244, 67, 54, 0.5);
+            background: rgba(244, 67, 54, 0.1);
+        }
+        
+        .trade-card.take-profit {
+            border-color: rgba(255, 193, 7, 0.5);
+            background: rgba(255, 193, 7, 0.1);
+        }
+        
+        .trade-card.risk-reward {
+            border-color: rgba(0, 188, 212, 0.5);
+            background: rgba(0, 188, 212, 0.1);
+        }
+        
+        .trade-label {
+            font-size: 0.85rem;
+            opacity: 0.9;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        
+        .trade-value {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: white;
+        }
+        
+        .trade-sub {
+            font-size: 0.8rem;
+            margin-top: 5px;
+            opacity: 0.8;
+            color: #FFD700;
+        }
+        
+        .position-size-section {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .position-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        
+        .position-card {
+            background: rgba(0, 188, 212, 0.1);
+            border: 1px solid rgba(0, 188, 212, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+        }
+        
+        .position-label {
+            font-size: 0.85rem;
+            opacity: 0.9;
+            margin-bottom: 5px;
+        }
+        
+        .position-value {
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: #00BCD4;
+        }
+        
         .status-bar {
             background: rgba(255, 255, 255, 0.05);
             border-radius: 10px;
@@ -358,6 +468,59 @@ def create_dashboard_template():
                     </div>
                 </div>
                 
+                <!-- Trade Details Section -->
+                <div id="trade-details" class="trade-details" style="display: none;">
+                    <h3 style="text-align: center; margin-bottom: 20px; color: #FFD700;">📋 Trade Details</h3>
+                    
+                    <div class="trade-grid">
+                        <div class="trade-card entry">
+                            <div class="trade-label">🎯 Entry Price</div>
+                            <div class="trade-value" id="entry-price">--</div>
+                        </div>
+                        <div class="trade-card stop-loss">
+                            <div class="trade-label">🛑 Stop Loss</div>
+                            <div class="trade-value" id="stop-loss">--</div>
+                        </div>
+                        <div class="trade-card take-profit">
+                            <div class="trade-label">🎯 Take Profit 1</div>
+                            <div class="trade-value" id="take-profit-1">--</div>
+                            <div class="trade-sub">Profit: <span id="profit-tp1">$--</span></div>
+                        </div>
+                        <div class="trade-card take-profit">
+                            <div class="trade-label">🎯 Take Profit 2</div>
+                            <div class="trade-value" id="take-profit-2">--</div>
+                            <div class="trade-sub">Profit: <span id="profit-tp2">$--</span></div>
+                        </div>
+                        <div class="trade-card take-profit">
+                            <div class="trade-label">🎯 Take Profit 3</div>
+                            <div class="trade-value" id="take-profit-3">--</div>
+                            <div class="trade-sub">Profit: <span id="profit-tp3">$--</span></div>
+                        </div>
+                        <div class="trade-card risk-reward">
+                            <div class="trade-label">📊 Risk/Reward</div>
+                            <div class="trade-value" id="risk-reward">1:--</div>
+                        </div>
+                    </div>
+                    
+                    <div class="position-size-section">
+                        <h4 style="text-align: center; margin: 20px 0 10px; color: #00BCD4;">💰 Position Sizing</h4>
+                        <div class="position-grid">
+                            <div class="position-card">
+                                <div class="position-label">Position Size</div>
+                                <div class="position-value" id="position-size">--%</div>
+                            </div>
+                            <div class="position-card">
+                                <div class="position-label">Risk Amount</div>
+                                <div class="position-value" id="risk-amount">$--</div>
+                            </div>
+                            <div class="position-card">
+                                <div class="position-label">ATR (14)</div>
+                                <div class="position-value" id="atr-value">$--</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
                 <div class="indicators-grid">
                     <div class="indicator-card">
                         <div class="indicator-label">RSI (14)</div>
@@ -433,6 +596,32 @@ def create_dashboard_template():
             document.getElementById('macd-value').textContent = data.macd.toFixed(2);
             document.getElementById('sma20-value').textContent = `$${data.sma_20.toFixed(2)}`;
             document.getElementById('sma50-value').textContent = `$${data.sma_50.toFixed(2)}`;
+            
+            // Update trade details (show only for BUY/SELL signals)
+            const tradeDetails = document.getElementById('trade-details');
+            if (data.signal_type !== 'HOLD') {
+                tradeDetails.style.display = 'block';
+                
+                // Update trade prices
+                document.getElementById('entry-price').textContent = `$${data.entry_price.toFixed(2)}`;
+                document.getElementById('stop-loss').textContent = `$${data.stop_loss.toFixed(2)}`;
+                document.getElementById('take-profit-1').textContent = `$${data.take_profit_1.toFixed(2)}`;
+                document.getElementById('take-profit-2').textContent = `$${data.take_profit_2.toFixed(2)}`;
+                document.getElementById('take-profit-3').textContent = `$${data.take_profit_3.toFixed(2)}`;
+                document.getElementById('risk-reward').textContent = `1:${data.risk_reward_ratio.toFixed(1)}`;
+                
+                // Update potential profits
+                document.getElementById('profit-tp1').textContent = `$${data.potential_profit_tp1.toFixed(0)}`;
+                document.getElementById('profit-tp2').textContent = `$${data.potential_profit_tp2.toFixed(0)}`;
+                document.getElementById('profit-tp3').textContent = `$${data.potential_profit_tp3.toFixed(0)}`;
+                
+                // Update position sizing
+                document.getElementById('position-size').textContent = `${data.position_size_percent.toFixed(1)}%`;
+                document.getElementById('risk-amount').textContent = `$${data.risk_amount_dollars.toFixed(0)}`;
+                document.getElementById('atr-value').textContent = `$${data.atr_value.toFixed(2)}`;
+            } else {
+                tradeDetails.style.display = 'none';
+            }
             
             // Update timestamp
             const timestamp = new Date(data.timestamp).toLocaleString();
