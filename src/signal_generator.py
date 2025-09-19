@@ -98,7 +98,7 @@ class SignalGenerator:
         
         return data
     
-    def macd_signals(self, data: pd.DataFrame, fast: int = 12, slow: int = 26) -> pd.DataFrame:
+    def macd_signals(self, data: pd.DataFrame, fast: int = 12, slow: int = 26, signal_period: int = 9) -> pd.DataFrame:
         """
         Generate signals based on MACD crossovers
         
@@ -106,12 +106,13 @@ class SignalGenerator:
             data (pd.DataFrame): Price data with MACD indicators
             fast (int): Fast EMA period
             slow (int): Slow EMA period
+            signal_period (int): Signal line period
             
         Returns:
             pd.DataFrame: Data with MACD signals
         """
         macd_col = f'MACD_{fast}_{slow}'
-        signal_col = f'MACD_Signal_{signal}'
+        signal_col = f'MACD_Signal_{signal_period}'
         
         if macd_col not in data.columns or signal_col not in data.columns:
             print(f"Warning: MACD indicators not found in data")
