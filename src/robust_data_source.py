@@ -14,6 +14,13 @@ try:
     import yfinance as yf
 except ImportError:
     yf = None
+try:
+    from tradingview_data import TradingViewData
+except ImportError:
+    try:
+        from .tradingview_data import TradingViewData
+    except ImportError:
+        TradingViewData = None
 import threading
 import queue
 
@@ -27,6 +34,22 @@ class RobustXAUUSDDataSource:
         self.price_history = []
         self.last_update = None
         self.data_source = "unknown"
+        
+        # Initialize TradingView API (PUBLIC - NO ACCOUNT REQUIRED)
+        self.tradingview = TradingViewData() if TradingViewData else None
+        if self.tradingview:
+            print("✅ TradingView Public API initialized (no authentication required)")
+        
+        # Data source priority (1 = highest priority)
+        self.data_sources = {
+            'tradingview': 1,      # TradingView public API - highest quality
+            'yahoo_gc': 2,         # Yahoo GC=F (Gold futures) 
+            'yahoo_gld': 3,        # Yahoo GLD (Gold ETF)
+            'yahoo_iau': 4,        # Yahoo IAU (Gold ETF)
+            'finnhub': 5,          # Finnhub API
+            'alpha_vantage': 6,    # Alpha Vantage API
+            'mock': 99             # Mock data (last resort)
+        }
         
         # Rate limiting
         self.last_request_time = {}
@@ -74,11 +97,11 @@ class RobustXAUUSDDataSource:
     def get_current_price(self) -> Optional[Dict]:
         """Get current XAUUSD price from the best available source"""
         
-        # Try real-time sources first
+        # Try real-time sources first (in priority order)
         sources = [
-            ("Yahoo Finance Real-time", self._get_yahoo_realtime),
-            ("TradingView Real-time", self._get_tradingview_realtime),
-            ("Mock Real-time", self._get_mock_realtime)
+            ("TradingView Real-time", self._get_tradingview_realtime),  # HIGHEST QUALITY - Public API
+            ("Yahoo Finance Real-time", self._get_yahoo_realtime),      # Backup source
+            ("Mock Real-time", self._get_mock_realtime)                 # Last resort
         ]
         
         for source_name, source_func in sources:
@@ -247,19 +270,39 @@ class RobustXAUUSDDataSource:
         return None
     
     def _get_tradingview_realtime(self) -> Optional[Dict]:
-        """Get real-time data from TradingView"""
+        """Get real-time XAUUSD data from TradingView Public API (NO ACCOUNT REQUIRED)"""
         self._update_request_time("TradingView Real-time")
         
-        # For now, generate realistic real-time data
-        base_price = 2640.0 + np.random.normal(0, 10)
+        if not self.tradingview:
+            print("⚠️ TradingView API not available")
+            return None
         
-        return {
-            'price': base_price,
-            'prev_close': base_price - np.random.normal(0, 3),
-            'timestamp': datetime.now(),
-            'volume': np.random.randint(1000, 5000),
-            'source': 'TradingView'
-        }
+        try:
+            # Get real-time quote from TradingView public API
+            quote = self.tradingview.get_best_xauusd_quote()
+            
+            if quote and quote.get('price', 0) > 0:
+                # Convert TradingView quote to our standard format
+                return {
+                    'price': float(quote['price']),
+                    'prev_close': float(quote.get('price', 0)) - float(quote.get('change_abs', 0)),
+                    'timestamp': quote.get('timestamp', datetime.now()),
+                    'volume': float(quote.get('volume', 0)),
+                    'high': float(quote.get('high', quote['price'])),
+                    'low': float(quote.get('low', quote['price'])),
+                    'bid': float(quote.get('bid', 0)),
+                    'ask': float(quote.get('ask', 0)),
+                    'spread': float(quote.get('spread', 0)),
+                    'change_pct': float(quote.get('change', 0)),
+                    'source': f"TradingView-{quote.get('symbol', 'XAUUSD')}"
+                }
+            else:
+                print("⚠️ TradingView: No valid XAUUSD quote received")
+                return None
+                
+        except Exception as e:
+            print(f"❌ TradingView API error: {e}")
+            return None
     
     def _get_mock_realtime(self) -> Dict:
         """Generate mock real-time data"""

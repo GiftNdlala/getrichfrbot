@@ -13,24 +13,310 @@ from typing import Dict, Optional, List
 
 class TradingViewData:
     """
-    TradingView data source for XAUUSD
-    Uses TradingView's public API endpoints
+    TradingView data source for XAUUSD using PUBLIC REST API
+    NO ACCOUNT REQUIRED - Uses TradingView's free public endpoints
     """
     
     def __init__(self):
-        self.base_url = "https://scanner.tradingview.com"
+        # Public TradingView API endpoints (no authentication needed)
+        self.scanner_url = "https://scanner.tradingview.com"
+        self.symbol_url = "https://symbol-search.tradingview.com"
+        self.quotes_url = "https://api.tradingview.com"
+        
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.tradingview.com/',
-            'Origin': 'https://www.tradingview.com'
+            'Origin': 'https://www.tradingview.com',
+            'Referer': 'https://www.tradingview.com/'
         })
         
+        # XAUUSD symbol variations for TradingView
+        self.xauusd_symbols = [
+            "FX:XAUUSD",      # Primary XAUUSD symbol
+            "OANDA:XAUUSD",   # OANDA XAUUSD
+            "FOREXCOM:XAUUSD", # Forex.com XAUUSD
+            "FXCM:XAUUSD",    # FXCM XAUUSD
+            "COMEX:GC1!",     # Gold Futures
+        ]
+        
+    def get_real_time_quote(self) -> Dict[str, float]:
+        """
+        Get real-time XAUUSD quote using TradingView Scanner API
+        NO ACCOUNT REQUIRED - Uses public endpoints
+        
+        Returns:
+            Dict with current price, change, volume, etc.
+        """
+        print("🔍 Fetching real-time XAUUSD quote from TradingView...")
+        
+        # TradingView Scanner API payload - simplified for better compatibility
+        payload = {
+            "filter": [
+                {"left": "name", "operation": "match", "right": "XAUUSD"}
+            ],
+            "options": {"lang": "en"},
+            "markets": ["forex"],
+            "symbols": {
+                "query": {"types": []},
+                "tickers": []
+            },
+            "columns": [
+                "name", "close", "change", "change_abs", "high", "low", "volume"
+            ],
+            "sort": {"sortBy": "name", "sortOrder": "asc"},
+            "range": [0, 10]
+        }
+        
+        try:
+            response = self.session.post(
+                f"{self.scanner_url}/america/scan",
+                json=payload,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract XAUUSD data
+                if 'data' in data and data['data']:
+                    for row in data['data']:
+                        symbol_data = dict(zip(data['columns'], row['d']))
+                        
+                        if 'XAUUSD' in symbol_data.get('name', ''):
+                            quote = {
+                                'symbol': symbol_data.get('name', 'XAUUSD'),
+                                'price': float(symbol_data.get('close', 0)),
+                                'change': float(symbol_data.get('change', 0)),
+                                'change_abs': float(symbol_data.get('change_abs', 0)),
+                                'high': float(symbol_data.get('high', 0)),
+                                'low': float(symbol_data.get('low', 0)),
+                                'volume': float(symbol_data.get('volume', 0)),
+                                'bid': float(symbol_data.get('bid', 0)),
+                                'ask': float(symbol_data.get('ask', 0)),
+                                'spread': float(symbol_data.get('spread', 0)),
+                                'timestamp': datetime.now(),
+                                'source': 'TradingView Scanner API'
+                            }
+                            
+                            print(f"✅ TradingView: XAUUSD ${quote['price']:.2f} ({quote['change']:+.2f}%)")
+                            return quote
+                
+                print("⚠️ XAUUSD not found in TradingView scanner results")
+                return {}
+            
+            else:
+                print(f"❌ TradingView Scanner API error: {response.status_code}")
+                return {}
+                
+        except Exception as e:
+            print(f"❌ TradingView Scanner API error: {e}")
+            return {}
+    
+    def get_symbol_quotes(self, symbols: List[str]) -> Dict[str, Dict]:
+        """
+        Get quotes for multiple XAUUSD symbols using TradingView public API
+        
+        Args:
+            symbols: List of TradingView symbol names
+            
+        Returns:
+            Dict of symbol quotes
+        """
+        print(f"🔍 Getting quotes for {len(symbols)} symbols from TradingView...")
+        
+        quotes = {}
+        
+        for symbol in symbols:
+            try:
+                # Use TradingView's quote API (public endpoint)
+                url = f"{self.scanner_url}/america/scan"
+                payload = {
+                    "filter": [
+                        {"left": "name", "operation": "match", "right": symbol.replace(":", "")}
+                    ],
+                    "options": {"lang": "en"},
+                    "columns": [
+                        "name", "close", "change", "change_abs", "high", "low", 
+                        "volume", "bid", "ask", "spread", "update_mode"
+                    ],
+                    "sort": {"sortBy": "name", "sortOrder": "asc"},
+                    "range": [0, 10]
+                }
+                
+                response = self.session.post(url, json=payload, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if 'data' in data and data['data']:
+                        for row in data['data']:
+                            symbol_data = dict(zip(data['columns'], row['d']))
+                            
+                            quotes[symbol] = {
+                                'price': float(symbol_data.get('close', 0)),
+                                'change': float(symbol_data.get('change', 0)),
+                                'high': float(symbol_data.get('high', 0)),
+                                'low': float(symbol_data.get('low', 0)),
+                                'volume': float(symbol_data.get('volume', 0)),
+                                'timestamp': datetime.now(),
+                                'source': f'TradingView-{symbol}'
+                            }
+                            break
+                
+                time.sleep(0.1)  # Rate limiting
+                
+            except Exception as e:
+                print(f"⚠️ Error getting quote for {symbol}: {e}")
+                continue
+        
+        return quotes
+    
+    def get_best_xauusd_quote(self) -> Dict[str, float]:
+        """
+        Try multiple XAUUSD symbols and return the best available quote
+        Uses fallback methods if TradingView APIs fail
+        
+        Returns:
+            Best available XAUUSD quote
+        """
+        print("🎯 Finding best XAUUSD quote from multiple sources...")
+        
+        # Method 1: Try TradingView scanner API
+        scanner_quote = self.get_real_time_quote()
+        if scanner_quote and scanner_quote.get('price', 0) > 0:
+            return scanner_quote
+        
+        # Method 2: Try specific TradingView symbols
+        symbol_quotes = self.get_symbol_quotes(self.xauusd_symbols)
+        for symbol, quote in symbol_quotes.items():
+            if quote.get('price', 0) > 0:
+                quote['symbol'] = symbol
+                quote['source'] = f'TradingView-{symbol}'
+                print(f"✅ Using {symbol}: ${quote['price']:.2f}")
+                return quote
+        
+        # Method 3: Fallback to financial data APIs
+        fallback_quote = self._get_fallback_quote()
+        if fallback_quote and fallback_quote.get('price', 0) > 0:
+            return fallback_quote
+        
+        print("❌ No valid XAUUSD quotes found from any source")
+        return {}
+    
+    def _get_fallback_quote(self) -> Dict[str, float]:
+        """
+        Fallback method to get XAUUSD data from alternative free APIs
+        """
+        print("🔄 Trying fallback financial data sources...")
+        
+        # Try multiple free financial APIs
+        fallback_sources = [
+            self._get_metals_api_quote,
+            self._get_fixer_quote,
+            self._get_exchange_rates_quote,
+        ]
+        
+        for source_func in fallback_sources:
+            try:
+                quote = source_func()
+                if quote and quote.get('price', 0) > 0:
+                    return quote
+            except Exception as e:
+                print(f"⚠️ Fallback source error: {e}")
+                continue
+        
+        return {}
+    
+    def _get_metals_api_quote(self) -> Dict[str, float]:
+        """Get XAUUSD from metals-api.com (free tier available)"""
+        try:
+            # Metals API - free tier (no key required for basic data)
+            url = "https://api.metals.live/v1/spot/gold"
+            response = self.session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'price' in data:
+                    price = float(data['price'])
+                    if price > 0:
+                        return {
+                            'symbol': 'XAUUSD',
+                            'price': price,
+                            'change': 0,
+                            'change_abs': 0,
+                            'high': price,
+                            'low': price,
+                            'volume': 0,
+                            'timestamp': datetime.now(),
+                            'source': 'Metals-API'
+                        }
+        except:
+            pass
+        return {}
+    
+    def _get_fixer_quote(self) -> Dict[str, float]:
+        """Get gold price from fixer.io (has free tier)"""
+        try:
+            # Using a public financial data endpoint
+            url = "https://api.exchangerate-api.com/v4/latest/XAU"
+            response = self.session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'rates' in data and 'USD' in data['rates']:
+                    # Convert rate to price (XAU to USD)
+                    rate = float(data['rates']['USD'])
+                    price = 1.0 / rate if rate > 0 else 0
+                    
+                    if price > 1000:  # Sanity check for gold price range
+                        return {
+                            'symbol': 'XAUUSD',
+                            'price': price,
+                            'change': 0,
+                            'change_abs': 0,
+                            'high': price,
+                            'low': price,
+                            'volume': 0,
+                            'timestamp': datetime.now(),
+                            'source': 'ExchangeRate-API'
+                        }
+        except:
+            pass
+        return {}
+    
+    def _get_exchange_rates_quote(self) -> Dict[str, float]:
+        """Get gold data from another free exchange rate API"""
+        try:
+            # Try a different approach with precious metals
+            url = "https://api.metals.dev/v1/metal/spot?metal=gold&currency=usd"
+            headers = {'Accept': 'application/json'}
+            response = self.session.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and 'price' in data:
+                    price = float(data['price'])
+                    if 1000 < price < 5000:  # Gold price sanity check
+                        return {
+                            'symbol': 'XAUUSD',
+                            'price': price,
+                            'change': 0,
+                            'change_abs': 0,
+                            'high': price,
+                            'low': price,
+                            'volume': 0,
+                            'timestamp': datetime.now(),
+                            'source': 'Metals-Dev-API'
+                        }
+        except:
+            pass
+        return {}
+
     def get_xauusd_data(self, timeframe: str = "1D", count: int = 200) -> pd.DataFrame:
         """
-        Get XAUUSD data from TradingView
+        Get XAUUSD historical data from TradingView public API
         
         Args:
             timeframe: Data timeframe (1D, 4H, 1H, 15m, 5m, 1m)
