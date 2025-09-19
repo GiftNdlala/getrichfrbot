@@ -15,6 +15,7 @@ seaborn
 
 # Web dashboard
 flask
+beautifulsoup4
 
 # Additional utilities
 python-dotenv
