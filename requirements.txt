@@ -13,5 +13,8 @@ requests
 matplotlib
 seaborn
 
+# Web dashboard
+flask
+
 # Additional utilities
 python-dotenv
