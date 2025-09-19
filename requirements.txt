@@ -1,0 +1,21 @@
+# Core data analysis and manipulation
+pandas==2.1.4
+numpy==1.24.3
+
+# Technical analysis library
+ta==0.10.2
+
+# Data fetching and API
+yfinance==0.2.28
+requests==2.31.0
+
+# Visualization
+matplotlib==3.8.2
+plotly==5.17.0
+mplfinance==0.12.10b0
+
+# Backtesting and analysis
+backtrader==1.9.78.123
+
+# Additional utilities
+python-dotenv==1.0.0
