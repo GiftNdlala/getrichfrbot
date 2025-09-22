@@ -49,7 +49,9 @@ class SignalGenerator:
             # -1 = Sell signal (fast SMA crosses below slow SMA)
             # 0 = No signal
             
-            data[signal_col] = 0
+            # Work on a copy and use .loc for safe assignment
+            data = data.copy()
+            data.loc[:, signal_col] = 0
             
             # Buy signal: fast SMA crosses above slow SMA
             buy_condition = (data[fast_sma] > data[slow_sma]) & (data[fast_sma].shift(1) <= data[slow_sma].shift(1))
@@ -84,7 +86,8 @@ class SignalGenerator:
             return data
         
         signal_col = f'RSI_Signal_{period}'
-        data[signal_col] = 0
+        data = data.copy()
+        data.loc[:, signal_col] = 0
         
         # Buy signal: RSI crosses above oversold level
         buy_condition = (data[rsi_col] > oversold) & (data[rsi_col].shift(1) <= oversold)
@@ -120,7 +123,8 @@ class SignalGenerator:
             return data
         
         # Create MACD signal column
-        data[f'{signal_col}_Signals'] = 0
+        data = data.copy()
+        data.loc[:, f'{signal_col}_Signals'] = 0
         
         # Buy signal: MACD line crosses above signal line
         buy_condition = (data[macd_col] > data[signal_col]) & (data[macd_col].shift(1) <= data[signal_col].shift(1))
@@ -153,7 +157,8 @@ class SignalGenerator:
             return data
         
         signal_col = f'BB_Signal_{period}'
-        data[signal_col] = 0
+        data = data.copy()
+        data.loc[:, signal_col] = 0
         
         # Buy signal: Price touches or crosses below lower band
         buy_condition = (data['Close'] <= data[lower_col]) & (data['Close'].shift(1) > data[lower_col].shift(1))
@@ -183,7 +188,8 @@ class SignalGenerator:
             return data
         
         signal_col = 'Volume_Confirmation'
-        data[signal_col] = 0
+        data = data.copy()
+        data.loc[:, signal_col] = 0
         
         # Volume confirmation: high volume supports the price movement
         high_volume = data['Volume_Ratio'] > volume_threshold
@@ -215,7 +221,8 @@ class SignalGenerator:
             pd.DataFrame: Data with trend following signals
         """
         signal_col = 'Trend_Following_Signal'
-        data[signal_col] = 0
+        data = data.copy()
+        data.loc[:, signal_col] = 0
         
         # Check if we have the required indicators
         required_indicators = ['SMA_20', 'SMA_50', 'RSI_14']
@@ -258,15 +265,21 @@ class SignalGenerator:
         if method == 'majority':
             # Simple majority vote
             combined_signal = signal_data.sum(axis=1)
-            data['signal'] = np.where(combined_signal > 0, 1, 
-                                    np.where(combined_signal < 0, -1, 0))
+            data = data.copy()
+            data.loc[:, 'signal'] = np.where(
+                combined_signal > 0, 1,
+                np.where(combined_signal < 0, -1, 0)
+            )
         
         elif method == 'weighted':
             # Weighted average (you can adjust weights)
             weights = np.ones(len(self.signal_columns))
             weighted_sum = (signal_data * weights).sum(axis=1)
-            data['signal'] = np.where(weighted_sum > 0.5, 1,
-                                    np.where(weighted_sum < -0.5, -1, 0))
+            data = data.copy()
+            data.loc[:, 'signal'] = np.where(
+                weighted_sum > 0.5, 1,
+                np.where(weighted_sum < -0.5, -1, 0)
+            )
         
         elif method == 'consensus':
             # All signals must agree
@@ -274,17 +287,24 @@ class SignalGenerator:
             negative_signals = (signal_data < 0).sum(axis=1)
             total_signals = len(self.signal_columns)
             
-            data['signal'] = np.where(positive_signals == total_signals, 1,
-                                    np.where(negative_signals == total_signals, -1, 0))
+            data = data.copy()
+            data.loc[:, 'signal'] = np.where(
+                positive_signals == total_signals, 1,
+                np.where(negative_signals == total_signals, -1, 0)
+            )
         
         else:
             print(f"Unknown method: {method}. Using majority vote.")
             combined_signal = signal_data.sum(axis=1)
-            data['signal'] = np.where(combined_signal > 0, 1,
-                                    np.where(combined_signal < 0, -1, 0))
+            data = data.copy()
+            data.loc[:, 'signal'] = np.where(
+                combined_signal > 0, 1,
+                np.where(combined_signal < 0, -1, 0)
+            )
         
         # Add signal strength (number of confirming signals)
-        data['signal_strength'] = signal_data.abs().sum(axis=1)
+        data = data.copy()
+        data.loc[:, 'signal_strength'] = signal_data.abs().sum(axis=1)
         
         return data
     
@@ -299,6 +319,8 @@ class SignalGenerator:
             pd.DataFrame: Data with all signals
         """
         print("Generating trading signals...")
+        # Reset collected signal columns to avoid duplication across runs
+        self.signal_columns = []
         
         # Generate different types of signals
         data = self.sma_crossover_signals(data)

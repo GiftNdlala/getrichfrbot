@@ -31,40 +31,52 @@ def init_live_stream():
     def signal_callback(signal: LiveSignal):
         global current_signal_data, signal_history
         
+        # Sanitize values to be JSON-safe (no NaN/inf)
+        def sanitize(value):
+            try:
+                if value is None:
+                    return 0
+                if isinstance(value, float):
+                    if value != value or value == float('inf') or value == float('-inf'):
+                        return 0.0
+                return value
+            except Exception:
+                return 0
+
         current_signal_data = {
             'timestamp': signal.timestamp,
             'symbol': signal.symbol,
-            'current_price': signal.current_price,
-            'signal': signal.signal,
+            'current_price': sanitize(signal.current_price),
+            'signal': int(sanitize(signal.signal)),
             'signal_type': signal.signal_type,
-            'confidence': signal.confidence,
-            'rsi': signal.rsi,
-            'macd': signal.macd,
-            'macd_signal': signal.macd_signal,
-            'sma_20': signal.sma_20,
-            'sma_50': signal.sma_50,
-            'price_change': signal.price_change,
-            'price_change_pct': signal.price_change_pct,
+            'confidence': sanitize(signal.confidence),
+            'rsi': sanitize(signal.rsi),
+            'macd': sanitize(signal.macd),
+            'macd_signal': sanitize(signal.macd_signal),
+            'sma_20': sanitize(signal.sma_20),
+            'sma_50': sanitize(signal.sma_50),
+            'price_change': sanitize(signal.price_change),
+            'price_change_pct': sanitize(signal.price_change_pct),
             
             # Alert Category Data
             'alert_level': signal.alert_level,
             'alert_color': signal.alert_color,
-            'target_pips': signal.target_pips,
-            'success_rate': signal.success_rate,
+            'target_pips': int(sanitize(signal.target_pips)),
+            'success_rate': sanitize(signal.success_rate),
             
             # Risk Management Data
-            'entry_price': signal.entry_price,
-            'stop_loss': signal.stop_loss,
-            'take_profit_1': signal.take_profit_1,
-            'take_profit_2': signal.take_profit_2,
-            'take_profit_3': signal.take_profit_3,
-            'risk_reward_ratio': signal.risk_reward_ratio,
-            'atr_value': signal.atr_value,
-            'position_size_percent': signal.position_size_percent,
-            'risk_amount_dollars': signal.risk_amount_dollars,
-            'potential_profit_tp1': signal.potential_profit_tp1,
-            'potential_profit_tp2': signal.potential_profit_tp2,
-            'potential_profit_tp3': signal.potential_profit_tp3
+            'entry_price': sanitize(signal.entry_price),
+            'stop_loss': sanitize(signal.stop_loss),
+            'take_profit_1': sanitize(signal.take_profit_1),
+            'take_profit_2': sanitize(signal.take_profit_2),
+            'take_profit_3': sanitize(signal.take_profit_3),
+            'risk_reward_ratio': sanitize(signal.risk_reward_ratio),
+            'atr_value': sanitize(signal.atr_value),
+            'position_size_percent': sanitize(signal.position_size_percent),
+            'risk_amount_dollars': sanitize(signal.risk_amount_dollars),
+            'potential_profit_tp1': sanitize(signal.potential_profit_tp1),
+            'potential_profit_tp2': sanitize(signal.potential_profit_tp2),
+            'potential_profit_tp3': sanitize(signal.potential_profit_tp3)
         }
         
         # Add to history safely
