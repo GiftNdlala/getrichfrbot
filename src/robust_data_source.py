@@ -65,6 +65,8 @@ class RobustXAUUSDDataSource:
         
         # Try multiple data sources in order of preference
         sources = [
+            ("Yahoo Finance (GC=F)", self._get_yahoo_gcf_data),
+            ("Yahoo Finance (XAUUSD=X)", self._get_yahoo_spot_data),
             ("Yahoo Finance (GLD)", self._get_yahoo_gld_data),
             ("Yahoo Finance (IAU)", self._get_yahoo_iau_data),
             ("Yahoo Finance (GOLD)", self._get_yahoo_gold_data),
@@ -146,6 +148,30 @@ class RobustXAUUSDDataSource:
                 
                 return data
         except:
+            pass
+        return None
+
+    def _get_yahoo_gcf_data(self, days: int) -> Optional[pd.DataFrame]:
+        """Get data from Yahoo Finance Gold Futures GC=F (closest to XAUUSD)."""
+        self._update_request_time("Yahoo Finance (GC=F)")
+        try:
+            ticker = yf.Ticker("GC=F")
+            data = ticker.history(period=f"{days}d", interval="1d")
+            if not data.empty:
+                return data
+        except Exception:
+            pass
+        return None
+
+    def _get_yahoo_spot_data(self, days: int) -> Optional[pd.DataFrame]:
+        """Get data from Yahoo Finance spot XAUUSD=X."""
+        self._update_request_time("Yahoo Finance (XAUUSD=X)")
+        try:
+            ticker = yf.Ticker("XAUUSD=X")
+            data = ticker.history(period=f"{days}d", interval="1d")
+            if not data.empty:
+                return data
+        except Exception:
             pass
         return None
     
@@ -250,21 +276,27 @@ class RobustXAUUSDDataSource:
         self._update_request_time("Yahoo Finance Real-time")
         
         try:
-            # Try GLD for real-time data
-            ticker = yf.Ticker("GLD")
-            data = ticker.history(period="2d", interval="1m")
-            
-            if not data.empty:
-                current_price = data['Close'].iloc[-1] * 10  # Convert to gold price
-                prev_close = data['Close'].iloc[-2] * 10 if len(data) > 1 else current_price
-                
-                return {
-                    'price': float(current_price),
-                    'prev_close': float(prev_close),
-                    'timestamp': datetime.now(),
-                    'volume': float(data['Volume'].iloc[-1]) if not data['Volume'].empty else 0,
-                    'source': 'Yahoo Finance (GLD)'
-                }
+            # Prefer spot XAUUSD=X
+            for symbol, source_label, scale in [
+                ("XAUUSD=X", "Yahoo Finance (XAUUSD=X)", 1.0),
+                ("GC=F", "Yahoo Finance (GC=F)", 1.0),
+                ("GLD", "Yahoo Finance (GLD)", 10.0),
+            ]:
+                try:
+                    ticker = yf.Ticker(symbol)
+                    data = ticker.history(period="2d", interval="1m")
+                    if not data.empty:
+                        current_price = float(data['Close'].iloc[-1]) * scale
+                        prev_close = float(data['Close'].iloc[-2]) * scale if len(data) > 1 else current_price
+                        return {
+                            'price': current_price,
+                            'prev_close': prev_close,
+                            'timestamp': datetime.now(),
+                            'volume': float(data['Volume'].iloc[-1]) if 'Volume' in data.columns and not data['Volume'].empty else 0.0,
+                            'source': source_label
+                        }
+                except Exception:
+                    continue
         except:
             pass
         return None
