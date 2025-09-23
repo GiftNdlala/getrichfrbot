@@ -1,0 +1,8 @@
+# Ignore env and local artifacts
+.env
+*.env
+__pycache__/
+*.pyc
+logs/
+data/trades.sqlite
+.venv/
