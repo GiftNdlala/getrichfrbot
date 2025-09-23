@@ -19,3 +19,5 @@ beautifulsoup4
 
 # Additional utilities
 python-dotenv
+MetaTrader5
+pytz
