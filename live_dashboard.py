@@ -16,6 +16,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.live_data_stream import LiveDataStream, LiveSignal
+from src.persistence import PersistenceManager
 
 app = Flask(__name__)
 
@@ -23,6 +24,7 @@ app = Flask(__name__)
 live_stream = None
 current_signal_data = None
 signal_history = []
+persistence = PersistenceManager()
 
 def init_live_stream():
     """Initialize the live data stream with real market data"""
@@ -141,6 +143,10 @@ def get_current_signal():
             'last_update': datetime.now().isoformat()
         })
     else:
+        # Try fetch from DB
+        last = persistence.latest_signal()
+        if last:
+            return jsonify({'status': 'success', 'data': last, 'last_update': datetime.now().isoformat()})
         return jsonify({
             'status': 'waiting',
             'message': 'Waiting for first signal...',
@@ -150,11 +156,14 @@ def get_current_signal():
 @app.route('/api/signal_history')
 def get_signal_history():
     """API endpoint to get signal history"""
-    return jsonify({
-        'status': 'success',
-        'data': signal_history if isinstance(signal_history, list) else [],
-        'count': len(signal_history) if isinstance(signal_history, list) else 0
-    })
+    db_signals = []
+    try:
+        db_signals = persistence.recent_signals(10)
+    except Exception:
+        pass
+    fallback = signal_history if isinstance(signal_history, list) else []
+    data = db_signals if db_signals else fallback
+    return jsonify({'status': 'success', 'data': data, 'count': len(data)})
 
 @app.route('/api/status')
 def get_status():

@@ -16,6 +16,15 @@ from dataclasses import dataclass, asdict
 
 from indicators import TechnicalIndicators
 from signal_generator import SignalGenerator
+from .config import get_config
+try:
+    from .mt5_connector import MT5Connector
+except ImportError:
+    MT5Connector = None
+try:
+    from .persistence import PersistenceManager
+except ImportError:
+    PersistenceManager = None
 
 # Import WORKING real gold API for actual market data
 try:
@@ -92,6 +101,9 @@ class LiveDataStream:
         self.indicators = TechnicalIndicators()
         self.signal_generator = SignalGenerator()
         
+        # Config
+        self.config = get_config()
+
         # Initialize WORKING real gold API (tested and proven)
         self.simple_gold_api = SimpleRealGold() if SimpleRealGold else None
         if self.simple_gold_api:
@@ -107,11 +119,15 @@ class LiveDataStream:
         except:
             self.data_source = None
         
+        # MT5 primary connector (if available)
+        self.mt5 = MT5Connector() if MT5Connector else None
+
         # Data storage
         self.current_data = pd.DataFrame()
         self.current_signal = None
         self.last_update = None
         self.is_running = False
+        self.persistence = PersistenceManager() if PersistenceManager else None
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -173,13 +189,21 @@ class LiveDataStream:
         return data
     
     def _fetch_current_quote(self) -> Optional[Dict]:
-        """Fetch REAL current market quote from working APIs (no more mock data!)"""
+        """Fetch current market quote from primary (MT5) with fallbacks"""
+        # Primary: MT5
+        if self.mt5:
+            try:
+                q = self.mt5.get_current_quote()
+                if q and q.get('price', 0) > 0:
+                    return q
+            except Exception as e:
+                print(f"⚠️ MT5 quote error: {e}")
         
-        # Method 1: Use WORKING Simple Gold API (tested, gets real $3,715+ prices)
+        # Fallback 1: Simple Real Gold API
         if self.simple_gold_api:
             try:
                 real_data = self.simple_gold_api.get_real_gold_price()
-                if real_data and real_data.get('price', 0) > 3000:  # Real gold price range
+                if real_data and real_data.get('price', 0) > 0:
                     print(f"✅ REAL MARKET DATA: ${real_data['price']:.2f} from {real_data['source']}")
                     
                     # Calculate realistic price change
@@ -200,11 +224,11 @@ class LiveDataStream:
             except Exception as e:
                 print(f"⚠️ Simple Real Gold API error: {e}")
         
-        # Method 2: Try Working Gold API as backup
+        # Fallback 2: Working Gold API as backup
         if self.working_gold_api:
             try:
                 real_data = self.working_gold_api.get_real_gold_price()
-                if real_data and real_data.get('price', 0) > 3000:
+                if real_data and real_data.get('price', 0) > 0:
                     print(f"✅ BACKUP REAL DATA: ${real_data['price']:.2f} from {real_data['source']}")
                     return {
                         'price': float(real_data['price']),
@@ -216,11 +240,11 @@ class LiveDataStream:
             except Exception as e:
                 print(f"⚠️ Working Gold API error: {e}")
         
-        # Method 3: Try robust data source
+        # Fallback 3: robust data source
         if self.data_source:
             try:
                 current_data = self.data_source.get_current_price()
-                if current_data and current_data.get('price', 0) > 3000:
+                if current_data and current_data.get('price', 0) > 0:
                     print(f"✅ ROBUST DATA: ${current_data['price']:.2f}")
                     return {
                         'price': current_data['price'],
@@ -232,7 +256,7 @@ class LiveDataStream:
                 print(f"⚠️ Robust data source error: {e}")
         
         # Method 4: ONLY use realistic mock as absolute last resort
-        print("🚨 WARNING: All REAL sources failed - using realistic mock based on real market level")
+        print("🚨 WARNING: All REAL sources failed - using realistic mock")
         return self._generate_realistic_quote()
     
     def _generate_mock_quote(self) -> Dict:
@@ -253,12 +277,9 @@ class LiveDataStream:
         }
     
     def _generate_realistic_quote(self) -> Dict:
-        """Generate realistic quote based on actual gold market levels (~$3,715)"""
-        # Use realistic gold price range based on actual market data
-        base_real_price = 3715.0  # Based on our working API test ($3,715.90)
-        
-        # Add realistic market movement (gold typically moves $5-20 per update)
-        current_price = base_real_price + np.random.normal(0, 8)
+        """Generate realistic quote around latest historical close"""
+        base_price = float(self.historical_data['Close'].iloc[-1]) if not self.historical_data.empty else 2000.0
+        current_price = base_price + np.random.normal(0, 8)
         prev_price = current_price - np.random.normal(0, 3)
         
         return {
@@ -266,11 +287,14 @@ class LiveDataStream:
             'prev_close': prev_price,
             'timestamp': datetime.now(),
             'volume': np.random.randint(50000, 150000),  # Realistic gold volume
-            'source': 'Realistic Mock (Real Market Level $3,715)'
+            'source': 'Realistic Mock'
         }
     
     def _update_historical_data(self, current_quote: Dict):
         """Update historical data with new quote"""
+        # Session/blackout gating (minimal): if blocked, skip adding tradeable signal but keep data
+        if self._is_blackout_or_off_session():
+            pass
         new_row = pd.DataFrame({
             'Open': [current_quote['price']],
             'High': [current_quote['price']],
@@ -288,6 +312,28 @@ class LiveDataStream:
         
         # Recalculate indicators
         self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
+
+    def _is_blackout_or_off_session(self) -> bool:
+        try:
+            cfg = self.config
+            tz_name = cfg.get('sessions', {}).get('timezone', 'Africa/Johannesburg')
+            import pytz
+            tz = pytz.timezone(tz_name)
+            now = datetime.now(tz)
+            day = now.strftime('%a')
+            if day not in cfg.get('sessions', {}).get('days', ['Mon','Tue','Wed','Thu','Fri']):
+                return True
+            start = cfg.get('sessions', {}).get('trade_start', '10:00')
+            end = cfg.get('sessions', {}).get('trade_end', '19:00')
+            start_h, start_m = map(int, start.split(':'))
+            end_h, end_m = map(int, end.split(':'))
+            start_dt = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            end_dt = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+            if not (start_dt <= now <= end_dt):
+                return True
+        except Exception:
+            return False
+        return False
     
     def _determine_signal_category(self, confidence: float, atr_value: float, signal: int, latest_data: pd.Series) -> Dict:
         """Determine signal alert category based on confidence and market conditions"""
@@ -511,12 +557,17 @@ class LiveDataStream:
     def _generate_live_signal(self, current_quote: Dict) -> LiveSignal:
         """Generate live trading signal with categorized alerts and risk management"""
         
+        # Respect session/blackout: if off, force HOLD signal but continue updating UI
+        off = self._is_blackout_or_off_session()
+
         # Get latest indicator values
         latest_data = self.historical_data.iloc[-1]
         
         # Generate signal using signal generator
         signal_data = self.signal_generator.generate_all_signals(self.historical_data.tail(50))
         current_signal = signal_data['signal'].iloc[-1] if 'signal' in signal_data.columns else 0
+        if off:
+            current_signal = 0
         
         # Calculate confidence based on indicator alignment
         confidence = self._calculate_confidence(latest_data, current_signal)
@@ -653,6 +704,13 @@ class LiveDataStream:
                         # Store current signal
                         self.current_signal = live_signal
                         self.last_update = datetime.now()
+
+                        # Persist signal
+                        if self.persistence:
+                            try:
+                                self.persistence.save_signal(asdict(live_signal))
+                            except Exception as e:
+                                print(f"⚠️ Persist error: {e}")
                         
                         # Notify callbacks
                         self._notify_callbacks(live_signal)
