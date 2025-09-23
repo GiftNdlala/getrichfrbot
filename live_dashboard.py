@@ -16,6 +16,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.live_data_stream import LiveDataStream, LiveSignal
+from src.config import get_config
 from src.persistence import PersistenceManager
 
 app = Flask(__name__)
@@ -96,7 +97,9 @@ def init_live_stream():
             print(f"   Target: {signal.target_pips} pips | Success Rate: {signal.success_rate:.1f}% | Confidence: {signal.confidence:.1f}%")
     
     # Create and start live stream with REAL market data
-    live_stream = LiveDataStream(symbol="XAUUSD", update_interval=30)
+    cfg = get_config()
+    symbol = cfg.get('broker', {}).get('symbol', 'XAUUSD')
+    live_stream = LiveDataStream(symbol=symbol, update_interval=30)
     live_stream.add_signal_callback(signal_callback)
     live_stream.start_streaming()
     print("✅ Live stream with REAL market data initialized and started")
