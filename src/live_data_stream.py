@@ -140,8 +140,30 @@ class LiveDataStream:
         try:
             print("📊 Fetching initial historical data...")
             
-            # Use robust data source
-            data = self.data_source.get_historical_data(days=365)
+            # Prefer MT5 historical data if available
+            if self.mt5:
+                try:
+                    import MetaTrader5 as mt5
+                    rates = self.mt5.get_rates(mt5.TIMEFRAME_M1, 2000)
+                    if rates is not None and len(rates) > 100:
+                        import pandas as pd
+                        df = pd.DataFrame(rates)
+                        df['time'] = pd.to_datetime(df['time'], unit='s')
+                        df = df.rename(columns={'time': 'Date', 'real_volume': 'Volume'})
+                        df.set_index('Date', inplace=True)
+                        df = df[['open','high','low','close','tick_volume']].rename(columns={'open':'Open','high':'High','low':'Low','close':'Close','tick_volume':'Volume'})
+                        data = df
+                    else:
+                        data = None
+                except Exception as e:
+                    print(f"⚠️ MT5 history error: {e}")
+                    data = None
+            else:
+                data = None
+
+            # Fallback to robust data source
+            if data is None or data.empty:
+                data = self.data_source.get_historical_data(days=365)
             
             if data.empty:
                 print("⚠️ No data received, using mock data")

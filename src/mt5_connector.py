@@ -26,8 +26,13 @@ class MT5Connector:
 		self.symbol = broker.get('symbol', 'XAUUSD')
 		password_env = cfg.get('secrets_env', {}).get('mt5_password_env', 'MT5_PASSWORD')
 		password = os.getenv(password_env)
-		# Initialize terminal
-		if not mt5.initialize():
+		# Initialize terminal (use explicit path if provided)
+		terminal_path = os.getenv('MT5_TERMINAL_PATH')
+		if terminal_path:
+			ok = mt5.initialize(path=terminal_path)
+		else:
+			ok = mt5.initialize()
+		if not ok:
 			return False
 		# Attempt login (if terminal not already logged in)
 		if login and password and server:
@@ -36,6 +41,15 @@ class MT5Connector:
 		mt5.symbol_select(self.symbol, True)
 		self.initialized = True
 		return True
+
+	def get_rates(self, timeframe, count: int = 1000):
+		if not self.initialized and not self.initialize():
+			return None
+		try:
+			rates = mt5.copy_rates_from_pos(self.symbol, timeframe, 0, count)
+			return rates
+		except Exception:
+			return None
 
 	def shutdown(self):
 		if mt5:
