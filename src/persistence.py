@@ -51,6 +51,22 @@ class PersistenceManager:
 				)
 				"""
 			)
+			conn.execute(
+				"""
+				CREATE TABLE IF NOT EXISTS trades (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					timestamp TEXT NOT NULL,
+					symbol TEXT NOT NULL,
+					direction INTEGER,
+					entry REAL,
+					sl REAL,
+					tp REAL,
+					lots REAL,
+					ticket INTEGER,
+					status TEXT
+				)
+				"""
+			)
 			conn.commit()
 
 	def save_signal(self, data: Dict[str, Any]) -> None:
@@ -65,6 +81,14 @@ class PersistenceManager:
 			placeholders = ','.join(['?']*len(columns))
 			values = [data.get(col) for col in columns]
 			conn.execute(f"INSERT INTO signals ({','.join(columns)}) VALUES ({placeholders})", values)
+			conn.commit()
+
+	def save_trade(self, trade: Dict[str, Any]) -> None:
+		with sqlite3.connect(self.db_path) as conn:
+			columns = ['timestamp','symbol','direction','entry','sl','tp','lots','ticket','status']
+			values = [trade.get(c) for c in columns]
+			placeholders = ','.join(['?']*len(columns))
+			conn.execute(f"INSERT INTO trades ({','.join(columns)}) VALUES ({placeholders})", values)
 			conn.commit()
 
 	def latest_signal(self) -> Optional[Dict[str, Any]]:

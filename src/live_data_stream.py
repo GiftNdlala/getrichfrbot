@@ -25,6 +25,10 @@ try:
     from .persistence import PersistenceManager
 except ImportError:
     PersistenceManager = None
+try:
+    from .executor import AutoTrader
+except ImportError:
+    AutoTrader = None
 
 # Import WORKING real gold API for actual market data
 try:
@@ -128,6 +132,7 @@ class LiveDataStream:
         self.last_update = None
         self.is_running = False
         self.persistence = PersistenceManager() if PersistenceManager else None
+        self.autotrader = AutoTrader(symbol=self.symbol) if AutoTrader else None
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -739,6 +744,30 @@ class LiveDataStream:
                         
                         # Print update
                         print(f"🔄 {live_signal.timestamp} | {live_signal.symbol} | ${live_signal.current_price:.2f} | {live_signal.signal_type} ({live_signal.confidence:.1f}%)")
+
+                        # Auto-trading (opt-in)
+                        if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session():
+                            # Use TP1 for initial target
+                            tp = live_signal.take_profit_1
+                            sl = live_signal.stop_loss
+                            entry = live_signal.entry_price
+                            trade = self.autotrader.place_market_order(1 if live_signal.signal == 1 else -1, entry, sl, tp)
+                            if trade and self.persistence:
+                                try:
+                                    self.persistence.save_trade({
+                                        'timestamp': live_signal.timestamp,
+                                        'symbol': live_signal.symbol,
+                                        'direction': live_signal.signal,
+                                        'entry': entry,
+                                        'sl': sl,
+                                        'tp': tp,
+                                        'lots': trade.get('volume', 0.0),
+                                        'ticket': trade.get('ticket', 0),
+                                        'status': 'SENT'
+                                    })
+                                    print(f"✅ Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')}")
+                                except Exception as e:
+                                    print(f"⚠️ Trade persist error: {e}")
                         
                     else:
                         print("⚠️ Failed to fetch current quote")

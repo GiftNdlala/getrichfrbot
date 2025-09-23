@@ -33,6 +33,12 @@
     "primary": "MT5",
     "backups": []
   },
+  "execution": {
+    "enabled": false,
+    "demo_only": true,
+    "slippage_points": 20,
+    "deviation_points": 30
+  },
   "notifications": {
     "telegram_enabled": false,
     "telegram_bot_token_env": "TELEGRAM_BOT_TOKEN",
