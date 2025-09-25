@@ -58,7 +58,14 @@
       "tier2_pips": 9
     },
     "low_tp_pips": 5,
-    "medium_tp_primary_pips": 9
+    "medium_tp_primary_pips": 9,
+    "farmer": {
+      "enabled": true,
+      "tp_pips": 2,
+      "sl_pips": 6,
+      "trades_per_cycle": 3,
+      "cycle_seconds": 120
+    }
   },
   "notifications": {
     "telegram_enabled": false,

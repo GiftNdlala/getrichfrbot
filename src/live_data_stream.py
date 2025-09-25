@@ -147,6 +147,8 @@ class LiveDataStream:
         self.order_manager = OrderManager(self.symbol) if OrderManager else None
         # Session control override
         self.ignore_session_filter = False
+        # Farmer state
+        self._farmer_last_cycle = None
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -833,6 +835,49 @@ class LiveDataStream:
                                 else:
                                     # LOW/MEDIUM use absolute TP we computed
                                     send_one(None, None, tp_absolute=tp)
+
+                            # 2-pip farmer (runs alongside, subject to farmer cycle)
+                            try:
+                                farmer_cfg = self.config.get('execution', {}).get('farmer', {})
+                                if farmer_cfg.get('enabled', False):
+                                    now = datetime.now()
+                                    if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= int(farmer_cfg.get('cycle_seconds', 120)):
+                                        self._farmer_last_cycle = now
+                                        tp_pips = int(farmer_cfg.get('tp_pips', 2))
+                                        sl_pips = int(farmer_cfg.get('sl_pips', 6))
+                                        count = int(farmer_cfg.get('trades_per_cycle', 3))
+                                        # place burst of small TP orders
+                                        for i in range(count):
+                                            if self.campaign and not self.campaign.allow(self.symbol, side, level):
+                                                break
+                                            entry = live_signal.entry_price
+                                            sl = entry - sl_pips if side == 1 else entry + sl_pips
+                                            tp_small = entry + tp_pips if side == 1 else entry - tp_pips
+                                            trade = self.autotrader.place_market_order(side, entry, sl, tp_small)
+                                            if trade and self.persistence:
+                                                try:
+                                                    self.persistence.save_trade({
+                                                        'timestamp': live_signal.timestamp,
+                                                        'symbol': live_signal.symbol,
+                                                        'direction': side,
+                                                        'entry': entry,
+                                                        'sl': sl,
+                                                        'tp': tp_small,
+                                                        'lots': trade.get('volume', 0.0),
+                                                        'ticket': trade.get('ticket', 0),
+                                                        'status': 'SENT',
+                                                        'alert_level': level,
+                                                        'tier': 'FARMER'
+                                                    })
+                                                    if self.order_manager:
+                                                        self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp_small, level, tier='FARMER')
+                                                    if self.campaign:
+                                                        self.campaign.record(self.symbol, side, level)
+                                                    print(f"🌾 Farmer order sent: ticket={trade.get('ticket')} tp={tp_pips}p")
+                                                except Exception as e:
+                                                    print(f"⚠️ Farmer persist error: {e}")
+                            except Exception:
+                                pass
                         
                     else:
                         print("⚠️ Failed to fetch current quote")
