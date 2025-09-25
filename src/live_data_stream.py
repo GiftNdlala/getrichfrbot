@@ -418,7 +418,7 @@ class LiveDataStream:
                 return {
                     'alert_level': 'HIGH',
                     'alert_color': '#f44336',  # Red - High attention
-                    'target_pips': int(45 + (volatility_factor * 5)),  # 40-50 pips
+                    'target_pips': int(16 + (volatility_factor * 5)),  # 16-10 pips
                     'success_rate': min(confidence * 0.9, 85.0)  # Slightly lower success due to higher target
                 }
             elif total_score >= 70 and confidence >= 60:
@@ -426,7 +426,7 @@ class LiveDataStream:
                 return {
                     'alert_level': 'MEDIUM',
                     'alert_color': '#FF9800',  # Orange - Medium attention
-                    'target_pips': int(25 + (volatility_factor * 5)),  # 20-30 pips
+                    'target_pips': int(10 + (volatility_factor * 5)),  # 10-5 pips
                     'success_rate': min(confidence * 0.95, 80.0)  # Balanced success rate
                 }
             else:
@@ -434,7 +434,7 @@ class LiveDataStream:
                 return {
                     'alert_level': 'LOW',
                     'alert_color': '#4CAF50',  # Green - Safe/Conservative
-                    'target_pips': int(12 + (volatility_factor * 3)),  # 10-15 pips
+                    'target_pips': int(5 + (volatility_factor * 3)),  # 1-5 pips
                     'success_rate': min(confidence * 1.1, 95.0)  # Highest success rate
                 }
                 

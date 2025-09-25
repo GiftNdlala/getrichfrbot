@@ -4,19 +4,20 @@
     "platform": "MT5",
     "server": "Exness-MT5Trial9",
     "login": 211338841,
-    "symbol": "XAUUSD"
+    "symbol": "XAUUSDm"
   },
   "risk": {
-    "risk_percent_per_trade": 0.75,
+    "risk_percent_per_trade": 0.25,
     "max_concurrent_trades": 1,
     "sl_min_atr": 0.5,
-    "tp_atr_multipliers": [0.75, 1.25, 2.0],
+    "tp_atr_multipliers": [0.3, 0.6, 1.0],
     "move_sl_to_be_after_tp1": true
   },
+
   "sessions": {
     "timezone": "Africa/Johannesburg",
     "trade_start": "10:00",
-    "trade_end": "19:00",
+    "trade_end": "23:59",
     "days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
   },
   "blackout": {
@@ -34,10 +35,10 @@
     "backups": []
   },
   "execution": {
-    "enabled": false,
+    "enabled": true,
     "demo_only": true,
-    "slippage_points": 20,
-    "deviation_points": 30
+    "slippage_points": 100,
+    "deviation_points": 180
   },
   "notifications": {
     "telegram_enabled": false,
