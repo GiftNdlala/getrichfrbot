@@ -556,8 +556,12 @@
                 <button id="btn-pause" style="padding:10px 16px; border-radius:8px; border:none; background:#f44336; color:#fff; font-weight:600; cursor:pointer;">Pause</button>
                 <button id="btn-resume" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">Resume</button>
                 <button id="btn-session-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#2196F3; color:#fff; font-weight:600; cursor:pointer;">Force Session On</button>
+                <button id="btn-farmer-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#9C27B0; color:#fff; font-weight:600; cursor:pointer;">Farmer: Off</button>
             </div>
-            <div id="throttle-status" class="status-indicator status-hold">Campaign: --</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <div id="farmer-badge" class="status-indicator status-active">🌾 Farmer in: --s</div>
+                <div id="throttle-status" class="status-indicator status-hold">Campaign: --</div>
+            </div>
         </div>
         
         <div id="loading" class="loading">
@@ -773,6 +777,14 @@
             } catch (e) { console.error('Error fetching trades', e); }
         }
         
+        async function fetchStatusOnly() {
+            try {
+                const res = await fetch('/api/status');
+                const st = await res.json();
+                updateFarmerBadge(st);
+            } catch (e) {}
+        }
+
         function updateDashboard(data) {
             document.getElementById('loading').style.display = 'none';
             document.getElementById('dashboard').style.display = 'block';
@@ -871,6 +883,8 @@
             
             // Reset countdown
             nextUpdateTime = 30;
+            // Also fetch status for farmer countdown
+            fetchStatusOnly();
         }
         
         function updateStatusIndicator(data) {
@@ -985,6 +999,18 @@
                 </div>
             `;
         }
+
+        function updateFarmerBadge(status) {
+            try {
+                const badge = document.getElementById('farmer-badge');
+                if (!status || typeof status.farmer_next_in_seconds === 'undefined') return;
+                const enabled = !!status.farmer_enabled;
+                badge.className = `status-indicator ${enabled ? 'status-active' : 'status-hold'}`;
+                badge.textContent = `🌾 Farmer ${enabled ? 'in' : 'disabled'}: ${enabled ? (status.farmer_next_in_seconds ?? '--') + 's' : ''}`;
+                const btn = document.getElementById('btn-farmer-toggle');
+                if (btn) btn.textContent = `Farmer: ${enabled ? 'On' : 'Off'}`;
+            } catch (e) {}
+        }
         
         function showLoading() {
             document.getElementById('loading').style.display = 'block';
@@ -1022,6 +1048,7 @@
             updateInterval = setInterval(fetchCurrentSignal, 30000); // 30 seconds
             countdownInterval = setInterval(updateCountdown, 1000); // 1 second
             setInterval(fetchTrades, 15000);
+            setInterval(fetchStatusOnly, 2000);
             
             // Fetch signal history every 5 minutes
             setInterval(fetchSignalHistory, 300000); // 5 minutes
@@ -1039,6 +1066,14 @@
                 forceSessionOn = !forceSessionOn;
                 e.target.textContent = forceSessionOn ? 'Force Session Off' : 'Force Session On';
                 try { await fetch('/api/session_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ force: forceSessionOn }) }); } catch {}
+            }
+            if (e.target && e.target.id === 'btn-farmer-toggle') {
+                const enabled = e.target.textContent.includes('Off');
+                try {
+                    const res = await fetch('/api/farmer_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) });
+                    const st = await res.json();
+                    updateFarmerBadge(st);
+                } catch {}
             }
         });
         

@@ -149,6 +149,9 @@ class LiveDataStream:
         self.ignore_session_filter = False
         # Farmer state
         self._farmer_last_cycle = None
+        farmer_cfg = self.config.get('execution', {}).get('farmer', {})
+        self.farmer_enabled = bool(farmer_cfg.get('enabled', False))
+        self.farmer_cycle_seconds = int(farmer_cfg.get('cycle_seconds', 120))
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -838,11 +841,11 @@ class LiveDataStream:
 
                             # 2-pip farmer (runs alongside, subject to farmer cycle)
                             try:
-                                farmer_cfg = self.config.get('execution', {}).get('farmer', {})
-                                if farmer_cfg.get('enabled', False):
+                                if self.farmer_enabled:
                                     now = datetime.now()
-                                    if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= int(farmer_cfg.get('cycle_seconds', 120)):
+                                    if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= self.farmer_cycle_seconds:
                                         self._farmer_last_cycle = now
+                                        farmer_cfg = self.config.get('execution', {}).get('farmer', {})
                                         tp_pips = int(farmer_cfg.get('tp_pips', 2))
                                         sl_pips = int(farmer_cfg.get('sl_pips', 6))
                                         count = int(farmer_cfg.get('trades_per_cycle', 3))
@@ -909,13 +912,26 @@ class LiveDataStream:
     
     def get_status(self) -> Dict:
         """Get current streaming status"""
+        # Compute farmer next seconds
+        next_in = None
+        if self.farmer_enabled:
+            if self._farmer_last_cycle is None:
+                next_in = self.farmer_cycle_seconds
+            else:
+                elapsed = (datetime.now() - self._farmer_last_cycle).total_seconds()
+                next_in = max(0, self.farmer_cycle_seconds - int(elapsed))
         return {
             'is_running': self.is_running,
             'last_update': self.last_update.isoformat() if self.last_update else None,
             'symbol': self.symbol,
             'update_interval': self.update_interval,
-            'current_signal': asdict(self.current_signal) if self.current_signal else None
+            'current_signal': asdict(self.current_signal) if self.current_signal else None,
+            'farmer_enabled': self.farmer_enabled,
+            'farmer_next_in_seconds': next_in
         }
+
+    def set_farmer_enabled(self, enabled: bool):
+        self.farmer_enabled = bool(enabled)
 
 # Example usage
 if __name__ == "__main__":

@@ -214,6 +214,15 @@ def session_toggle():
         return jsonify({'status': 'success', 'ignore_session_filter': live_stream.ignore_session_filter})
     return jsonify({'status': 'no_stream'})
 
+@app.route('/api/farmer_toggle', methods=['POST'])
+def farmer_toggle():
+    global live_stream
+    enabled = bool(request.json.get('enabled', False))
+    if live_stream:
+        live_stream.set_farmer_enabled(enabled)
+        return jsonify({'status': 'success', 'farmer_enabled': live_stream.farmer_enabled})
+    return jsonify({'status': 'no_stream'})
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
