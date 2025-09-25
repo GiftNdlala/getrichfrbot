@@ -164,6 +164,8 @@ class LiveDataStream:
         self.enable_high = True
         # Event engine
         self.event_engine = EventEngine(self.symbol) if EventEngine else None
+        # Global engine mode
+        self.engine_mode = 'ALL'
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -1042,6 +1044,11 @@ class LiveDataStream:
 
     def set_event_mode(self, enabled: bool):
         self.event_mode_enabled = bool(enabled)
+
+    def set_engine_mode(self, mode: str):
+        allowed = {'ALL','FARMER_ONLY','LOW_ONLY','MEDIUM_ONLY','HIGH_ONLY','EVENT_ONLY','NONE'}
+        if mode in allowed:
+            self.engine_mode = mode
 
 # Example usage
 if __name__ == "__main__":

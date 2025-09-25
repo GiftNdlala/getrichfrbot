@@ -275,6 +275,18 @@ def event_toggle():
         return jsonify({'status': 'success', 'event_mode_enabled': live_stream.event_mode_enabled})
     return jsonify({'status': 'no_stream'})
 
+@app.route('/api/engine_mode', methods=['POST'])
+def engine_mode():
+    global live_stream
+    mode = request.json.get('mode', 'ALL')
+    if live_stream:
+        try:
+            live_stream.set_engine_mode(mode)
+            return jsonify({'status': 'success', 'engine_mode': mode})
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)})
+    return jsonify({'status': 'no_stream'})
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')

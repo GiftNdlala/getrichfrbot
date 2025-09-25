@@ -561,6 +561,15 @@
                 <button id="btn-med-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#795548; color:#fff; font-weight:600; cursor:pointer;">MED: On</button>
                 <button id="btn-high-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#E91E63; color:#fff; font-weight:600; cursor:pointer;">HIGH: On</button>
                 <button id="btn-event-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#F44336; color:#fff; font-weight:600; cursor:pointer;">Event: Off</button>
+                <select id="engine-mode" style="padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); color:white;">
+                    <option value="ALL">Mode: ALL</option>
+                    <option value="FARMER_ONLY">Farmer Only</option>
+                    <option value="LOW_ONLY">LOW Only</option>
+                    <option value="MEDIUM_ONLY">MEDIUM Only</option>
+                    <option value="HIGH_ONLY">HIGH Only</option>
+                    <option value="EVENT_ONLY">EVENT Only</option>
+                    <option value="NONE">NONE</option>
+                </select>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
                 <div id="farmer-badge" class="status-indicator status-active">🌾 Farmer in: --s</div>
@@ -827,6 +836,10 @@
                 const st = await res.json();
                 updateFarmerBadge(st);
                 updateEngineToggleButtons(st);
+                const modeSel = document.getElementById('engine-mode');
+                if (modeSel && st.engine_mode) {
+                    modeSel.value = st.engine_mode;
+                }
             } catch (e) {}
         }
 
@@ -1184,6 +1197,14 @@
             if (e.target && e.target.id === 'btn-event-toggle') {
                 const enabled = e.target.textContent.endsWith('Off');
                 try { await fetch('/api/event_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
+                fetchStatusOnly();
+            }
+        });
+
+        document.addEventListener('change', async (e) => {
+            if (e.target && e.target.id === 'engine-mode') {
+                const mode = e.target.value;
+                try { await fetch('/api/engine_mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode }) }); } catch {}
                 fetchStatusOnly();
             }
         });
