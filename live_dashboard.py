@@ -22,14 +22,14 @@ from src.persistence import PersistenceManager
 app = Flask(__name__)
 
 # Global variables
-live_stream = None
+streams = {}
 current_signal_data = None
 signal_history = []
 persistence = PersistenceManager()
 
 def init_live_stream():
-    """Initialize the live data stream with real market data"""
-    global live_stream
+    """Initialize live data streams for configured symbols"""
+    global streams
     
     def signal_callback(signal: LiveSignal):
         global current_signal_data, signal_history
@@ -99,10 +99,23 @@ def init_live_stream():
     # Create and start live stream with REAL market data
     cfg = get_config()
     symbol = cfg.get('broker', {}).get('symbol', 'XAUUSD')
-    live_stream = LiveDataStream(symbol=symbol, update_interval=30)
-    live_stream.add_signal_callback(signal_callback)
-    live_stream.start_streaming()
-    print("✅ Live stream with REAL market data initialized and started")
+    # Start XAUUSDm (from config)
+    gold_stream = LiveDataStream(symbol=symbol, update_interval=30)
+    gold_stream.add_signal_callback(signal_callback)
+    gold_stream.start_streaming()
+    streams[symbol] = gold_stream
+
+    # Start US30m secondary stream
+    try:
+        us_symbol = os.getenv('US30_SYMBOL', 'US30m')
+        us_stream = LiveDataStream(symbol=us_symbol, update_interval=30)
+        us_stream.add_signal_callback(signal_callback)
+        us_stream.start_streaming()
+        streams[us_symbol] = us_stream
+        print(f"✅ Live stream initialized for {us_symbol}")
+    except Exception as e:
+        print(f"⚠️ Could not start US30 stream: {e}")
+    print("✅ Live streams initialized and started")
 
 # Routes
 @app.route('/')
@@ -138,27 +151,20 @@ def about():
 # API Routes
 @app.route('/api/current_signal')
 def get_current_signal():
-    """API endpoint to get current signal data"""
-    if current_signal_data:
-        return jsonify({
-            'status': 'success',
-            'data': current_signal_data,
-            'last_update': datetime.now().isoformat()
-        })
-    else:
-        # Try fetch from DB
-        last = persistence.latest_signal()
-        if last:
-            return jsonify({'status': 'success', 'data': last, 'last_update': datetime.now().isoformat()})
-        return jsonify({
-            'status': 'waiting',
-            'message': 'Waiting for first signal...',
-            'last_update': datetime.now().isoformat()
-        })
+    """API endpoint to get current signal data; accepts ?symbol="""
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    stream = streams.get(sym)
+    if stream and stream.get_current_signal():
+        return jsonify({'status':'success','data': asdict(stream.get_current_signal()), 'last_update': datetime.now().isoformat()})
+    # Fallback DB
+    last = persistence.latest_signal()
+    if last:
+        return jsonify({'status': 'success', 'data': last, 'last_update': datetime.now().isoformat()})
+    return jsonify({'status': 'waiting', 'message': 'Waiting for first signal...', 'last_update': datetime.now().isoformat()})
 
 @app.route('/api/signal_history')
 def get_signal_history():
-    """API endpoint to get signal history"""
+    """API endpoint to get signal history; accepts ?symbol & limit"""
     db_signals = []
     try:
         db_signals = persistence.recent_signals(10)
@@ -170,15 +176,16 @@ def get_signal_history():
 
 @app.route('/api/status')
 def get_status():
-    """API endpoint to get system status"""
-    if live_stream:
-        status = live_stream.get_status()
-        status['dashboard_status'] = 'running'
-        status['real_data'] = 'active'
-    else:
-        status = {'dashboard_status': 'initializing', 'real_data': 'loading'}
-    
-    return jsonify(status)
+    """API endpoint to get system status; accepts ?symbol"""
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    stream = streams.get(sym)
+    if stream:
+        st = stream.get_status()
+        st['dashboard_status'] = 'running'
+        st['real_data'] = 'active'
+        st['symbol'] = sym
+        return jsonify(st)
+    return jsonify({'dashboard_status': 'initializing', 'real_data': 'loading', 'symbol': sym})
 
 @app.route('/api/trades')
 def get_trades():
@@ -204,57 +211,62 @@ def get_recent_trades():
 
 @app.route('/api/pause', methods=['POST'])
 def pause_trading():
-    global live_stream
-    if live_stream:
-        live_stream.is_running = False
-        return jsonify({'status': 'paused'})
+    global streams
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if s:
+        s.is_running = False
+        return jsonify({'status': 'paused', 'symbol': sym})
     return jsonify({'status': 'no_stream'})
 
 @app.route('/api/resume', methods=['POST'])
 def resume_trading():
-    global live_stream
-    if live_stream and not live_stream.is_running:
-        live_stream.start_streaming()
-        return jsonify({'status': 'resumed'})
+    global streams
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if s and not s.is_running:
+        s.start_streaming()
+        return jsonify({'status': 'resumed', 'symbol': sym})
     return jsonify({'status': 'no_stream'})
 
 @app.route('/api/session_toggle', methods=['POST'])
 def session_toggle():
-    global live_stream
+    global streams
     force = request.json.get('force', False)
-    if live_stream:
-        live_stream.ignore_session_filter = bool(force)
-        return jsonify({'status': 'success', 'ignore_session_filter': live_stream.ignore_session_filter})
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if s:
+        s.ignore_session_filter = bool(force)
+        return jsonify({'status': 'success', 'symbol': sym, 'ignore_session_filter': s.ignore_session_filter})
     return jsonify({'status': 'no_stream'})
 
 @app.route('/api/farmer_toggle', methods=['POST'])
 def farmer_toggle():
-    global live_stream
+    global streams
     enabled = bool(request.json.get('enabled', False))
-    if live_stream:
-        live_stream.set_farmer_enabled(enabled)
-        return jsonify({'status': 'success', 'farmer_enabled': live_stream.farmer_enabled})
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if s:
+        s.set_farmer_enabled(enabled)
+        return jsonify({'status': 'success', 'symbol': sym, 'farmer_enabled': s.farmer_enabled})
     return jsonify({'status': 'no_stream'})
 
 @app.route('/api/engine_toggle', methods=['POST'])
 def engine_toggle():
-    global live_stream
-    if not live_stream:
+    global streams
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if not s:
         return jsonify({'status': 'no_stream'})
     level = request.json.get('level')
     enabled = bool(request.json.get('enabled', True))
-    live_stream.set_engine_enabled(level, enabled)
-    return jsonify({
-        'status': 'success',
-        'level': level,
-        'engine_low_enabled': live_stream.enable_low,
-        'engine_medium_enabled': live_stream.enable_medium,
-        'engine_high_enabled': live_stream.enable_high
-    })
+    s.set_engine_enabled(level, enabled)
+    return jsonify({'status': 'success','symbol': sym,'level': level,'engine_low_enabled': s.enable_low,'engine_medium_enabled': s.enable_medium,'engine_high_enabled': s.enable_high})
 
 @app.route('/api/engine_analytics')
 def engine_analytics():
     hours = int(request.args.get('hours', 20))
+    # optional symbol filter later
     try:
         rows = persistence.recent_trades(hours=hours, limit=2000)
     except Exception:
@@ -268,21 +280,25 @@ def engine_analytics():
 
 @app.route('/api/event_toggle', methods=['POST'])
 def event_toggle():
-    global live_stream
+    global streams
     enabled = bool(request.json.get('enabled', False))
-    if live_stream:
-        live_stream.set_event_mode(enabled)
-        return jsonify({'status': 'success', 'event_mode_enabled': live_stream.event_mode_enabled})
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if s:
+        s.set_event_mode(enabled)
+        return jsonify({'status': 'success', 'symbol': sym, 'event_mode_enabled': s.event_mode_enabled})
     return jsonify({'status': 'no_stream'})
 
 @app.route('/api/engine_mode', methods=['POST'])
 def engine_mode():
-    global live_stream
+    global streams
     mode = request.json.get('mode', 'ALL')
-    if live_stream:
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if s:
         try:
-            live_stream.set_engine_mode(mode)
-            return jsonify({'status': 'success', 'engine_mode': mode})
+            s.set_engine_mode(mode)
+            return jsonify({'status': 'success', 'symbol': sym, 'engine_mode': mode})
         except Exception as e:
             return jsonify({'status': 'error', 'message': str(e)})
     return jsonify({'status': 'no_stream'})

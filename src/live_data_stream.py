@@ -164,6 +164,14 @@ class LiveDataStream:
         self.enable_high = True
         # Event engine
         self.event_engine = EventEngine(self.symbol) if EventEngine else None
+        # Ensure MT5 uses this stream's symbol
+        try:
+            if self.mt5:
+                self.mt5.symbol = self.symbol
+                import MetaTrader5 as mt5
+                mt5.symbol_select(self.symbol, True)
+        except Exception:
+            pass
         # Global engine mode
         self.engine_mode = 'ALL'
         
