@@ -853,59 +853,59 @@ class LiveDataStream:
                                 if self.campaign and not self.campaign.allow(self.symbol, side, level):
                                     print(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
                                 else:
-                                # Determine TP by level/tiering
-                                tp = live_signal.take_profit_1
-                                cfg_exec = self.config.get('execution', {})
-                                if level == 'LOW':
-                                    tp_pips = int(cfg_exec.get('low_tp_pips', 5))
-                                    tp_low_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
-                                    tp = tp_low_abs
-                                elif level == 'MEDIUM':
-                                    tp_pips = int(cfg_exec.get('medium_tp_primary_pips', 9))
-                                    tp_med_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
-                                    tp = tp_med_abs
-                                # HIGH: allow tiered spawning counts
-                                tiers = []
-                                if level == 'HIGH':
-                                    tier_cfg = cfg_exec.get('high_tier_tp_pips', { 'tier1_count':2,'tier1_pips':6,'tier2_count':3,'tier2_pips':9 })
-                                    tiers = (
-                                        [('TIER1', tier_cfg.get('tier1_pips',6))]*int(tier_cfg.get('tier1_count',2)) +
-                                        [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
-                                    )
-                                # Spawn orders
-                                def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None, engine: str = "INTRADAY"):
-                                    nonlocal live_signal
-                                    sl = live_signal.stop_loss
-                                    entry = live_signal.entry_price
-                                    local_tp = live_signal.take_profit_1
-                                    if tp_absolute is not None:
-                                        local_tp = tp_absolute
-                                    elif tp_pips_override is not None:
-                                        local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
-                                    trade = self.autotrader.place_market_order(side, entry, sl, local_tp)
-                                    if trade and self.persistence:
-                                        try:
-                                            self.persistence.save_trade({
-                                                'timestamp': live_signal.timestamp,
-                                                'symbol': live_signal.symbol,
-                                                'direction': side,
-                                                'entry': entry,
-                                                'sl': sl,
-                                                'tp': local_tp,
-                                                'lots': trade.get('volume', 0.0),
-                                                'ticket': trade.get('ticket', 0),
-                                                'status': 'SENT',
-                                                'alert_level': level,
-                                                'tier': tier_name or '',
-                                                'engine': engine
-                                            })
+                                    # Determine TP by level/tiering
+                                    tp = live_signal.take_profit_1
+                                    cfg_exec = self.config.get('execution', {})
+                                    if level == 'LOW':
+                                        tp_pips = int(cfg_exec.get('low_tp_pips', 5))
+                                        tp_low_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                        tp = tp_low_abs
+                                    elif level == 'MEDIUM':
+                                        tp_pips = int(cfg_exec.get('medium_tp_primary_pips', 9))
+                                        tp_med_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                        tp = tp_med_abs
+                                    # HIGH: allow tiered spawning counts
+                                    tiers = []
+                                    if level == 'HIGH':
+                                        tier_cfg = cfg_exec.get('high_tier_tp_pips', { 'tier1_count':2,'tier1_pips':6,'tier2_count':3,'tier2_pips':9 })
+                                        tiers = (
+                                            [('TIER1', tier_cfg.get('tier1_pips',6))]*int(tier_cfg.get('tier1_count',2)) +
+                                            [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
+                                        )
+                                    # Spawn orders
+                                    def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None, engine: str = "INTRADAY"):
+                                        nonlocal live_signal
+                                        sl = live_signal.stop_loss
+                                        entry = live_signal.entry_price
+                                        local_tp = live_signal.take_profit_1
+                                        if tp_absolute is not None:
+                                            local_tp = tp_absolute
+                                        elif tp_pips_override is not None:
+                                            local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
+                                        trade = self.autotrader.place_market_order(side, entry, sl, local_tp)
+                                        if trade and self.persistence:
+                                            try:
+                                                self.persistence.save_trade({
+                                                    'timestamp': live_signal.timestamp,
+                                                    'symbol': live_signal.symbol,
+                                                    'direction': side,
+                                                    'entry': entry,
+                                                    'sl': sl,
+                                                    'tp': local_tp,
+                                                    'lots': trade.get('volume', 0.0),
+                                                    'ticket': trade.get('ticket', 0),
+                                                    'status': 'SENT',
+                                                    'alert_level': level,
+                                                    'tier': tier_name or '',
+                                                    'engine': engine
+                                                })
                                                 print(f"✅ [{engine}] Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'}")
-                                            if self.order_manager:
-                                                self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
-                                            if self.campaign:
-                                                self.campaign.record(self.symbol, side, level)
-                                        except Exception as e:
-                                            print(f"⚠️ Trade persist error: {e}")
+                                                if self.order_manager:
+                                                    self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
+                                                if self.campaign:
+                                                    self.campaign.record(self.symbol, side, level)
+                                            except Exception as e:
+                                                print(f"⚠️ Trade persist error: {e}")
                                 if level == 'HIGH' and tiers:
                                     # Send tiered partials first
                                     for tier_name, pips in tiers:
