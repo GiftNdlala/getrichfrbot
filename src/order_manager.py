@@ -75,11 +75,19 @@ class OrderManager:
 		self.autotrader = AutoTrader(symbol)
 		self.mt5 = MT5Connector() if MT5Connector else None
 		self.managed: Dict[int, ManagedOrder] = {}
-        # Per-symbol caps
-        cfg = get_config()
-        caps = cfg.get('risk', {}).get('symbol_caps', {})
-        self.daily_loss_limit_pct = float(caps.get(symbol, {}).get('daily_loss_limit_pct', 3.0))
-        self.max_open_risk_pct = float(caps.get(symbol, {}).get('max_open_risk_pct', 5.0))
+		# Per-symbol caps
+		cfg = get_config()
+		caps = cfg.get('risk', {}).get('symbol_caps', {})
+		self.daily_loss_limit_pct = float(caps.get(symbol, {}).get('daily_loss_limit_pct', 3.0))
+		self.max_open_risk_pct = float(caps.get(symbol, {}).get('max_open_risk_pct', 5.0))
+		# Loss minimizer
+		lm = cfg.get('execution', {}).get('loss_minimizer', {})
+		self.loss_minimizer_enabled = bool(lm.get('enabled', True))
+		self.lm_soft_loss = float(lm.get('soft_loss_dollars', 3.0))
+		self.lm_max_loss = float(lm.get('max_loss_dollars', 12.0))
+		self.lm_retrace_points = float(lm.get('retrace_points', 10.0))
+		self.lm_window_seconds = int(lm.get('improvement_window_seconds', 20))
+		self._minimize_state: Dict[int, Dict] = {}
 
 	def register_new_order(self, ticket: int, direction: int, entry: float, sl: float, tp: float, alert_level: str, tier: Optional[str] = None):
 		self.managed[ticket] = ManagedOrder(ticket=ticket, open_time=datetime.utcnow(), entry=entry, sl=sl, tp=tp, direction=direction, alert_level=alert_level, tier=tier)
@@ -148,15 +156,66 @@ class OrderManager:
 			if alert == 'HIGH' and st.tier:
 				# nothing additional here; tiers were set as per trade creation
 				pass
-			# Time-based exit
+			# Time-based exit with loss minimizer
 			if age >= max_age:
-				# for LOW/MEDIUM prioritize exit quickly
-				self.autotrader.close_position(st.ticket)
-				self.persistence.update_trade(st.ticket, {
-					'status': 'CLOSED',
-					'reason': 'TIME'
-				})
-				self.managed.pop(st.ticket, None)
+				if not self._try_loss_minimizer(pos, st):
+					self.autotrader.close_position(st.ticket)
+					self.persistence.update_trade(st.ticket, {
+						'status': 'CLOSED',
+						'reason': 'TIME'
+					})
+					self.managed.pop(st.ticket, None)
 		except Exception:
 			return
+
+	def _approx_unrealized_dollars(self, pos, current_price: float) -> float:
+		try:
+			info = self.mt5.get_symbol_info()
+			tick_val = float(getattr(info, 'trade_tick_value', 1.0)) if info else 1.0
+			tick_size = float(getattr(info, 'trade_tick_size', 0.01)) if info else 0.01
+			points = (current_price - pos.price_open) if pos.type == 0 else (pos.price_open - current_price)  # 0=buy,1=sell
+			ticks = points / (tick_size or 0.01)
+			return float(pos.volume) * ticks * tick_val
+		except Exception:
+			return 0.0
+
+	def _try_loss_minimizer(self, pos, st: ManagedOrder) -> bool:
+		"""If enabled, try to reduce loss by waiting for a small retrace within a short window.
+		Returns True if deferring close; False to proceed closing now.
+		"""
+		if not self.loss_minimizer_enabled:
+			return False
+		pnl = self._approx_unrealized_dollars(pos, pos.price_current)
+		# Close immediately if within soft loss or profitable
+		if pnl >= 0 or abs(pnl) <= self.lm_soft_loss:
+			return False
+		# Close immediately if beyond max allowed loss
+		if abs(pnl) >= self.lm_max_loss:
+			print(f"⛔ Max loss cap reached ticket={st.ticket}: {pnl:.2f} >= {self.lm_max_loss:.2f}, closing now")
+			return False
+		state = self._minimize_state.get(st.ticket)
+		now = datetime.utcnow()
+		# Compute small retrace target in points
+		point = float(getattr(self.mt5.get_symbol_info(), 'point', 0.01) or 0.01)
+		retrace_price = pos.price_current + (self.lm_retrace_points * point if st.direction == 1 else -self.lm_retrace_points * point)
+		if not state:
+			self._minimize_state[st.ticket] = {
+				'start': now,
+				'target': retrace_price,
+				'dir': st.direction
+			}
+			print(f"🕒 Loss minimizer armed ticket={st.ticket} target={retrace_price:.2f} window={self.lm_window_seconds}s")
+			return True
+		# Window elapsed -> proceed to close
+		if (now - state['start']).total_seconds() >= self.lm_window_seconds:
+			print(f"⌛ Loss minimizer window elapsed ticket={st.ticket}, proceeding to close")
+			self._minimize_state.pop(st.ticket, None)
+			return False
+		# Retrace achieved -> proceed to close with reduced loss
+		if (st.direction == 1 and pos.price_current >= state['target']) or (st.direction == -1 and pos.price_current <= state['target']):
+			print(f"✅ Loss minimizer hit target ticket={st.ticket} price={pos.price_current:.2f}, closing")
+			self._minimize_state.pop(st.ticket, None)
+			return False
+		# Still waiting
+		return True
 
