@@ -728,6 +728,30 @@
                     </tbody>
                 </table>
             </div>
+
+            <!-- Recent Trades (20h) -->
+            <div class="signal-history" style="margin-top:20px; overflow:auto;">
+                <h3>🕒 Recent Trades (Last 20h)</h3>
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead>
+                        <tr style="text-align:left; border-bottom:1px solid rgba(255,255,255,0.2);">
+                            <th style="padding:8px;">Time</th>
+                            <th style="padding:8px;">Ticket</th>
+                            <th style="padding:8px;">Side</th>
+                            <th style="padding:8px;">Entry</th>
+                            <th style="padding:8px;">SL</th>
+                            <th style="padding:8px;">TP</th>
+                            <th style="padding:8px;">Lots</th>
+                            <th style="padding:8px;">Alert</th>
+                            <th style="padding:8px;">Tier</th>
+                            <th style="padding:8px;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recent-trades-body">
+                        <tr><td colspan="10" style="padding:12px; opacity:0.8;">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
     
@@ -775,6 +799,16 @@
                     renderOpenTrades(result.open_trades || []);
                 }
             } catch (e) { console.error('Error fetching trades', e); }
+        }
+
+        async function fetchRecentTrades() {
+            try {
+                const res = await fetch('/api/recent_trades?hours=20&limit=200');
+                const result = await res.json();
+                if (result.status === 'success') {
+                    renderRecentTrades(result.trades || []);
+                }
+            } catch (e) { console.error('Error fetching recent trades', e); }
         }
         
         async function fetchStatusOnly() {
@@ -927,6 +961,30 @@
             });
             body.innerHTML = html;
         }
+
+        function renderRecentTrades(trades) {
+            const body = document.getElementById('recent-trades-body');
+            if (!trades || trades.length === 0) {
+                body.innerHTML = '<tr><td colspan="10" style="padding:12px; opacity:0.8;">No trades in last 20 hours</td></tr>';
+                return;
+            }
+            let html = '';
+            trades.forEach(t => {
+                html += `<tr>
+                    <td style="padding:6px;">${t.timestamp || ''}</td>
+                    <td style="padding:6px;">${t.ticket || ''}</td>
+                    <td style="padding:6px;">${t.direction === 1 ? 'BUY' : (t.direction === -1 ? 'SELL' : '')}</td>
+                    <td style="padding:6px;">${(t.entry||0).toFixed ? `$${Number(t.entry).toFixed(2)}` : t.entry}</td>
+                    <td style="padding:6px;">${(t.sl||0).toFixed ? `$${Number(t.sl).toFixed(2)}` : t.sl}</td>
+                    <td style="padding:6px;">${(t.tp||0).toFixed ? `$${Number(t.tp).toFixed(2)}` : t.tp}</td>
+                    <td style="padding:6px;">${t.lots || ''}</td>
+                    <td style="padding:6px;">${t.alert_level || ''}</td>
+                    <td style="padding:6px;">${t.tier || ''}</td>
+                    <td style="padding:6px;">${t.status || ''}</td>
+                </tr>`
+            });
+            body.innerHTML = html;
+        }
         
         function updateSignalHistory(data) {
             // This would be called from the signal history API
@@ -1048,6 +1106,8 @@
             updateInterval = setInterval(fetchCurrentSignal, 30000); // 30 seconds
             countdownInterval = setInterval(updateCountdown, 1000); // 1 second
             setInterval(fetchTrades, 15000);
+            setInterval(fetchRecentTrades, 30000);
+            fetchRecentTrades();
             setInterval(fetchStatusOnly, 2000);
             
             // Fetch signal history every 5 minutes

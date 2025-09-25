@@ -139,6 +139,21 @@ class PersistenceManager:
 				rows = conn.execute("SELECT * FROM trades WHERE status IN ('SENT','OPEN')").fetchall()
 			return [dict(r) for r in rows]
 
+	def recent_trades(self, hours: int = 20, limit: int = 200) -> List[Dict[str, Any]]:
+		"""Return trades within the last N hours (open or closed)."""
+		cutoff = (datetime.utcnow() - datetime.timedelta(hours=hours)) if hasattr(datetime, 'timedelta') else None
+		# Build cutoff string; if datetime.timedelta not available for some reason, default to 20h ago
+		from datetime import datetime as _dt, timedelta as _td
+		cutoff_dt = _dt.utcnow() - _td(hours=hours)
+		cutoff_str = cutoff_dt.strftime('%Y-%m-%d %H:%M:%S')
+		with sqlite3.connect(self.db_path) as conn:
+			conn.row_factory = sqlite3.Row
+			rows = conn.execute(
+				"SELECT * FROM trades WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
+				(cutoff_str, limit)
+			).fetchall()
+			return [dict(r) for r in rows]
+
 	def latest_signal(self) -> Optional[Dict[str, Any]]:
 		with sqlite3.connect(self.db_path) as conn:
 			conn.row_factory = sqlite3.Row

@@ -189,6 +189,19 @@ def get_trades():
         open_trades = []
     return jsonify({'status': 'success', 'open_trades': open_trades})
 
+@app.route('/api/recent_trades')
+def get_recent_trades():
+    try:
+        hours = int(request.args.get('hours', 20))
+        limit = int(request.args.get('limit', 200))
+    except Exception:
+        hours, limit = 20, 200
+    try:
+        rows = persistence.recent_trades(hours=hours, limit=limit)
+    except Exception:
+        rows = []
+    return jsonify({'status': 'success', 'trades': rows, 'hours': hours, 'count': len(rows)})
+
 @app.route('/api/pause', methods=['POST'])
 def pause_trading():
     global live_stream
