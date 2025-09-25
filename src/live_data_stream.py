@@ -34,6 +34,10 @@ try:
 except ImportError:
     OrderManager = None
     CampaignManager = None
+try:
+    from .event_engine import EventEngine
+except ImportError:
+    EventEngine = None
 
 # Import WORKING real gold API for actual market data
 try:
@@ -158,6 +162,8 @@ class LiveDataStream:
         self.enable_low = True
         self.enable_medium = True
         self.enable_high = True
+        # Event engine
+        self.event_engine = EventEngine(self.symbol) if EventEngine else None
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -790,6 +796,40 @@ class LiveDataStream:
                         
                         # Print update
                         print(f"🔄 {live_signal.timestamp} | {live_signal.symbol} | ${live_signal.current_price:.2f} | {live_signal.signal_type} ({live_signal.confidence:.1f}%)")
+
+                        # Event override path
+                        if self.event_mode_enabled and self.event_engine:
+                            try:
+                                latest = self.historical_data.iloc[-1]
+                                high = float(latest.get('High', current_quote['price']))
+                                low = float(latest.get('Low', current_quote['price']))
+                                atr_val = float(latest.get('ATR_14', 0))
+                                self.event_engine.try_detect_spike(high, low, atr_val)
+                                idea = self.event_engine.generate_signal(current_quote['price'])
+                                if idea and not spread_block:
+                                    side = idea['direction']
+                                    entry = idea['entry']
+                                    sl = idea['sl']
+                                    tp = idea['tp']
+                                    trade = self.autotrader.place_market_order(side, entry, sl, tp)
+                                    if trade and self.persistence:
+                                        self.persistence.save_trade({
+                                            'timestamp': live_signal.timestamp,
+                                            'symbol': live_signal.symbol,
+                                            'direction': side,
+                                            'entry': entry,
+                                            'sl': sl,
+                                            'tp': tp,
+                                            'lots': trade.get('volume', 0.0),
+                                            'ticket': trade.get('ticket', 0),
+                                            'status': 'SENT',
+                                            'alert_level': 'EVENT',
+                                            'tier': 'EVENT',
+                                            'engine': 'EVENT'
+                                        })
+                                        print(f"⚡ [EVENT] order sent: ticket={trade.get('ticket')} entry={entry:.2f} sl={sl:.2f} tp={tp:.2f}")
+                            except Exception as e:
+                                print(f"⚠️ Event engine error: {e}")
 
                         # Auto-trading (opt-in) with campaign and per-alert logic
                         if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session() and not spread_block and not atr_block and not self.event_mode_enabled:
