@@ -557,6 +557,9 @@
                 <button id="btn-resume" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">Resume</button>
                 <button id="btn-session-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#2196F3; color:#fff; font-weight:600; cursor:pointer;">Force Session On</button>
                 <button id="btn-farmer-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#9C27B0; color:#fff; font-weight:600; cursor:pointer;">Farmer: Off</button>
+                <button id="btn-low-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#607D8B; color:#fff; font-weight:600; cursor:pointer;">LOW: On</button>
+                <button id="btn-med-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#795548; color:#fff; font-weight:600; cursor:pointer;">MED: On</button>
+                <button id="btn-high-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#E91E63; color:#fff; font-weight:600; cursor:pointer;">HIGH: On</button>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
                 <div id="farmer-badge" class="status-indicator status-active">🌾 Farmer in: --s</div>
@@ -752,6 +755,12 @@
                     </tbody>
                 </table>
             </div>
+
+            <!-- Engine Analytics -->
+            <div class="signal-history" style="margin-top:20px; overflow:auto;">
+                <h3>📈 Engine Activity (20h)</h3>
+                <div id="engine-analytics" style="display:flex; gap:12px; flex-wrap:wrap;"></div>
+            </div>
         </div>
     </div>
     
@@ -816,6 +825,7 @@
                 const res = await fetch('/api/status');
                 const st = await res.json();
                 updateFarmerBadge(st);
+                updateEngineToggleButtons(st);
             } catch (e) {}
         }
 
@@ -1069,6 +1079,20 @@
                 if (btn) btn.textContent = `Farmer: ${enabled ? 'On' : 'Off'}`;
             } catch (e) {}
         }
+
+        function updateEngineToggleButtons(status) {
+            try {
+                const low = !!status.engine_low_enabled;
+                const med = !!status.engine_medium_enabled;
+                const high = !!status.engine_high_enabled;
+                const lowBtn = document.getElementById('btn-low-toggle');
+                const medBtn = document.getElementById('btn-med-toggle');
+                const highBtn = document.getElementById('btn-high-toggle');
+                if (lowBtn) lowBtn.textContent = `LOW: ${low ? 'On' : 'Off'}`;
+                if (medBtn) medBtn.textContent = `MED: ${med ? 'On' : 'Off'}`;
+                if (highBtn) highBtn.textContent = `HIGH: ${high ? 'On' : 'Off'}`;
+            } catch (e) {}
+        }
         
         function showLoading() {
             document.getElementById('loading').style.display = 'block';
@@ -1108,6 +1132,8 @@
             setInterval(fetchTrades, 15000);
             setInterval(fetchRecentTrades, 30000);
             fetchRecentTrades();
+            setInterval(fetchEngineAnalytics, 30000);
+            fetchEngineAnalytics();
             setInterval(fetchStatusOnly, 2000);
             
             // Fetch signal history every 5 minutes
@@ -1135,7 +1161,39 @@
                     updateFarmerBadge(st);
                 } catch {}
             }
+            if (e.target && e.target.id === 'btn-low-toggle') {
+                const enabled = e.target.textContent.endsWith('Off');
+                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ level:'LOW', enabled }) }); } catch {}
+                fetchStatusOnly();
+            }
+            if (e.target && e.target.id === 'btn-med-toggle') {
+                const enabled = e.target.textContent.endsWith('Off');
+                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ level:'MEDIUM', enabled }) }); } catch {}
+                fetchStatusOnly();
+            }
+            if (e.target && e.target.id === 'btn-high-toggle') {
+                const enabled = e.target.textContent.endsWith('Off');
+                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ level:'HIGH', enabled }) }); } catch {}
+                fetchStatusOnly();
+            }
         });
+
+        async function fetchEngineAnalytics() {
+            try {
+                const res = await fetch('/api/engine_analytics?hours=20');
+                const result = await res.json();
+                if (result.status === 'success') {
+                    const c = result.counts || {};
+                    const el = document.getElementById('engine-analytics');
+                    el.innerHTML = `
+                        <div class="status-indicator status-active">FARMER: ${c.FARMER||0}</div>
+                        <div class="status-indicator status-active">LOW: ${c.INTRADAY_LOW||0}</div>
+                        <div class="status-indicator status-active">MED: ${c.INTRADAY_MED||0}</div>
+                        <div class="status-indicator status-active">HIGH: ${c.SWING_HIGH||0}</div>
+                    `;
+                }
+            } catch (e) {}
+        }
         
         // Cleanup on page unload
         window.addEventListener('beforeunload', function() {

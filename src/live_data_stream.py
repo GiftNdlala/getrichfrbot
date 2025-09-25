@@ -152,6 +152,10 @@ class LiveDataStream:
         farmer_cfg = self.config.get('execution', {}).get('farmer', {})
         self.farmer_enabled = bool(farmer_cfg.get('enabled', False))
         self.farmer_cycle_seconds = int(farmer_cfg.get('cycle_seconds', 120))
+        # Engine toggles
+        self.enable_low = True
+        self.enable_medium = True
+        self.enable_high = True
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -789,10 +793,18 @@ class LiveDataStream:
                         if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session() and not spread_block and not atr_block:
                             level = (live_signal.alert_level or 'LOW').upper()
                             side = 1 if live_signal.signal == 1 else -1
-                            # campaign check
-                            if self.campaign and not self.campaign.allow(self.symbol, side, level):
-                                print(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
+                            # Per-engine gating
+                            if level == 'LOW' and not self.enable_low:
+                                print("⏸️ Engine gated: LOW disabled")
+                            elif level == 'MEDIUM' and not self.enable_medium:
+                                print("⏸️ Engine gated: MEDIUM disabled")
+                            elif level == 'HIGH' and not self.enable_high:
+                                print("⏸️ Engine gated: HIGH disabled")
                             else:
+                                # campaign check
+                                if self.campaign and not self.campaign.allow(self.symbol, side, level):
+                                    print(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
+                                else:
                                 # Determine TP by level/tiering
                                 tp = live_signal.take_profit_1
                                 cfg_exec = self.config.get('execution', {})
@@ -839,7 +851,7 @@ class LiveDataStream:
                                                 'tier': tier_name or '',
                                                 'engine': engine
                                             })
-                                            print(f"✅ Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'}")
+                                                print(f"✅ [{engine}] Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'}")
                                             if self.order_manager:
                                                 self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
                                             if self.campaign:
@@ -963,11 +975,23 @@ class LiveDataStream:
             'update_interval': self.update_interval,
             'current_signal': asdict(self.current_signal) if self.current_signal else None,
             'farmer_enabled': self.farmer_enabled,
-            'farmer_next_in_seconds': next_in
+            'farmer_next_in_seconds': next_in,
+            'engine_low_enabled': self.enable_low,
+            'engine_medium_enabled': self.enable_medium,
+            'engine_high_enabled': self.enable_high
         }
 
     def set_farmer_enabled(self, enabled: bool):
         self.farmer_enabled = bool(enabled)
+
+    def set_engine_enabled(self, level: str, enabled: bool):
+        lv = (level or '').upper()
+        if lv == 'LOW':
+            self.enable_low = bool(enabled)
+        elif lv == 'MEDIUM':
+            self.enable_medium = bool(enabled)
+        elif lv == 'HIGH':
+            self.enable_high = bool(enabled)
 
 # Example usage
 if __name__ == "__main__":

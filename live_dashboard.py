@@ -236,6 +236,36 @@ def farmer_toggle():
         return jsonify({'status': 'success', 'farmer_enabled': live_stream.farmer_enabled})
     return jsonify({'status': 'no_stream'})
 
+@app.route('/api/engine_toggle', methods=['POST'])
+def engine_toggle():
+    global live_stream
+    if not live_stream:
+        return jsonify({'status': 'no_stream'})
+    level = request.json.get('level')
+    enabled = bool(request.json.get('enabled', True))
+    live_stream.set_engine_enabled(level, enabled)
+    return jsonify({
+        'status': 'success',
+        'level': level,
+        'engine_low_enabled': live_stream.enable_low,
+        'engine_medium_enabled': live_stream.enable_medium,
+        'engine_high_enabled': live_stream.enable_high
+    })
+
+@app.route('/api/engine_analytics')
+def engine_analytics():
+    hours = int(request.args.get('hours', 20))
+    try:
+        rows = persistence.recent_trades(hours=hours, limit=2000)
+    except Exception:
+        rows = []
+    counts = {'FARMER': 0, 'INTRADAY_LOW': 0, 'INTRADAY_MED': 0, 'SWING_HIGH': 0, 'INTRADAY': 0}
+    for r in rows:
+        engine = r.get('engine') or ''
+        if engine in counts:
+            counts[engine] += 1
+    return jsonify({'status': 'success', 'hours': hours, 'counts': counts})
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
