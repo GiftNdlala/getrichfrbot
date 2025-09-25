@@ -38,7 +38,27 @@
     "enabled": true,
     "demo_only": true,
     "slippage_points": 100,
-    "deviation_points": 180
+    "deviation_points": 180,
+    "campaign_window_minutes": 10,
+    "min_seconds_between_entries": 60,
+    "campaign_max_trades": {
+      "LOW": 6,
+      "MEDIUM": 6,
+      "HIGH": 9
+    },
+    "max_position_minutes": {
+      "LOW": 10,
+      "MEDIUM": 10,
+      "HIGH": 20
+    },
+    "high_tier_tp_pips": {
+      "tier1_count": 2,
+      "tier1_pips": 6,
+      "tier2_count": 3,
+      "tier2_pips": 9
+    },
+    "low_tp_pips": 5,
+    "medium_tp_primary_pips": 9
   },
   "notifications": {
     "telegram_enabled": false,
