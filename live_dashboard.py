@@ -5,6 +5,7 @@ Created by Gift Ndlala
 """
 
 from flask import Flask, render_template, jsonify, request
+from dataclasses import asdict
 import threading
 import time
 import json
