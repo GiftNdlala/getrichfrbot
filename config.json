@@ -11,7 +11,11 @@
     "max_concurrent_trades": 1,
     "sl_min_atr": 0.5,
     "tp_atr_multipliers": [0.3, 0.6, 1.0],
-    "move_sl_to_be_after_tp1": true
+    "move_sl_to_be_after_tp1": true,
+    "symbol_caps": {
+      "XAUUSDm": { "daily_loss_limit_pct": 3.0, "max_open_risk_pct": 5.0 },
+      "US30": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 6.0 }
+    }
   },
 
   "sessions": {

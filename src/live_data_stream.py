@@ -147,6 +147,8 @@ class LiveDataStream:
         self.order_manager = OrderManager(self.symbol) if OrderManager else None
         # Session control override
         self.ignore_session_filter = False
+        # Per-symbol event mode (manual toggle for now)
+        self.event_mode_enabled = False
         # Farmer state
         self._farmer_last_cycle = None
         farmer_cfg = self.config.get('execution', {}).get('farmer', {})
@@ -790,7 +792,7 @@ class LiveDataStream:
                         print(f"🔄 {live_signal.timestamp} | {live_signal.symbol} | ${live_signal.current_price:.2f} | {live_signal.signal_type} ({live_signal.confidence:.1f}%)")
 
                         # Auto-trading (opt-in) with campaign and per-alert logic
-                        if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session() and not spread_block and not atr_block:
+                        if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session() and not spread_block and not atr_block and not self.event_mode_enabled:
                             level = (live_signal.alert_level or 'LOW').upper()
                             side = 1 if live_signal.signal == 1 else -1
                             # Per-engine gating
@@ -978,7 +980,8 @@ class LiveDataStream:
             'farmer_next_in_seconds': next_in,
             'engine_low_enabled': self.enable_low,
             'engine_medium_enabled': self.enable_medium,
-            'engine_high_enabled': self.enable_high
+            'engine_high_enabled': self.enable_high,
+            'event_mode_enabled': self.event_mode_enabled
         }
 
     def set_farmer_enabled(self, enabled: bool):
@@ -992,6 +995,9 @@ class LiveDataStream:
             self.enable_medium = bool(enabled)
         elif lv == 'HIGH':
             self.enable_high = bool(enabled)
+
+    def set_event_mode(self, enabled: bool):
+        self.event_mode_enabled = bool(enabled)
 
 # Example usage
 if __name__ == "__main__":

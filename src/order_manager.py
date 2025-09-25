@@ -75,6 +75,11 @@ class OrderManager:
 		self.autotrader = AutoTrader(symbol)
 		self.mt5 = MT5Connector() if MT5Connector else None
 		self.managed: Dict[int, ManagedOrder] = {}
+        # Per-symbol caps
+        cfg = get_config()
+        caps = cfg.get('risk', {}).get('symbol_caps', {})
+        self.daily_loss_limit_pct = float(caps.get(symbol, {}).get('daily_loss_limit_pct', 3.0))
+        self.max_open_risk_pct = float(caps.get(symbol, {}).get('max_open_risk_pct', 5.0))
 
 	def register_new_order(self, ticket: int, direction: int, entry: float, sl: float, tp: float, alert_level: str, tier: Optional[str] = None):
 		self.managed[ticket] = ManagedOrder(ticket=ticket, open_time=datetime.utcnow(), entry=entry, sl=sl, tp=tp, direction=direction, alert_level=alert_level, tier=tier)
@@ -89,6 +94,8 @@ class OrderManager:
 		"""Poll MT5 and update statuses; apply exit rules"""
 		if not self.mt5:
 			return
+		# Per-symbol loss/exposure halts (simple placeholders)
+		# In a full implementation, compute realized PnL today and approximate open risk.
 		positions = self.mt5.get_positions(self.symbol)
 		open_tickets = {p.ticket for p in positions}
 		# Close detection for tickets we track but are not open anymore

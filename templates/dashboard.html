@@ -560,6 +560,7 @@
                 <button id="btn-low-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#607D8B; color:#fff; font-weight:600; cursor:pointer;">LOW: On</button>
                 <button id="btn-med-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#795548; color:#fff; font-weight:600; cursor:pointer;">MED: On</button>
                 <button id="btn-high-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#E91E63; color:#fff; font-weight:600; cursor:pointer;">HIGH: On</button>
+                <button id="btn-event-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#F44336; color:#fff; font-weight:600; cursor:pointer;">Event: Off</button>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
                 <div id="farmer-badge" class="status-indicator status-active">🌾 Farmer in: --s</div>
@@ -1077,6 +1078,10 @@
                 badge.textContent = `🌾 Farmer ${enabled ? 'in' : 'disabled'}: ${enabled ? (status.farmer_next_in_seconds ?? '--') + 's' : ''}`;
                 const btn = document.getElementById('btn-farmer-toggle');
                 if (btn) btn.textContent = `Farmer: ${enabled ? 'On' : 'Off'}`;
+                const evBtn = document.getElementById('btn-event-toggle');
+                if (evBtn && typeof status.event_mode_enabled !== 'undefined') {
+                    evBtn.textContent = `Event: ${status.event_mode_enabled ? 'On' : 'Off'}`;
+                }
             } catch (e) {}
         }
 
@@ -1174,6 +1179,11 @@
             if (e.target && e.target.id === 'btn-high-toggle') {
                 const enabled = e.target.textContent.endsWith('Off');
                 try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ level:'HIGH', enabled }) }); } catch {}
+                fetchStatusOnly();
+            }
+            if (e.target && e.target.id === 'btn-event-toggle') {
+                const enabled = e.target.textContent.endsWith('Off');
+                try { await fetch('/api/event_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
                 fetchStatusOnly();
             }
         });

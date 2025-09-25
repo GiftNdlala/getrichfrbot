@@ -266,6 +266,15 @@ def engine_analytics():
             counts[engine] += 1
     return jsonify({'status': 'success', 'hours': hours, 'counts': counts})
 
+@app.route('/api/event_toggle', methods=['POST'])
+def event_toggle():
+    global live_stream
+    enabled = bool(request.json.get('enabled', False))
+    if live_stream:
+        live_stream.set_event_mode(enabled)
+        return jsonify({'status': 'success', 'event_mode_enabled': live_stream.event_mode_enabled})
+    return jsonify({'status': 'no_stream'})
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
