@@ -84,3 +84,26 @@ class MT5Connector:
 				'source': 'MT5'
 			}
 		return None
+
+	def get_positions(self, symbol_filter: Optional[str] = None):
+		if not self.initialized and not self.initialize():
+			return []
+		try:
+			positions = mt5.positions_get()
+			if symbol_filter:
+				positions = [p for p in (positions or []) if p.symbol == symbol_filter]
+			return positions or []
+		except Exception:
+			return []
+
+	def get_orders_history(self, count: int = 50):
+		if not self.initialized and not self.initialize():
+			return []
+		try:
+			from datetime import datetime, timedelta
+			end = dt.datetime.now()
+			start = end - dt.timedelta(days=5)
+			history = mt5.history_deals_get(start, end)
+			return history or []
+		except Exception:
+			return []

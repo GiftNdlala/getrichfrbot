@@ -87,3 +87,55 @@ class AutoTrader:
 				"price": result.price,
 			}
 		return None
+
+	def modify_sl_tp(self, ticket: int, new_sl: Optional[float] = None, new_tp: Optional[float] = None) -> bool:
+		if mt5 is None:
+			return False
+		try:
+			position = next((p for p in mt5.positions_get() or [] if p.ticket == ticket), None)
+			if not position:
+				return False
+			request = {
+				"action": mt5.TRADE_ACTION_SLTP,
+				"symbol": position.symbol,
+				"position": ticket,
+				"sl": new_sl if new_sl is not None else position.sl,
+				"tp": new_tp if new_tp is not None else position.tp,
+				"magic": 20250923,
+				"comment": "Modify SLTP",
+			}
+			result = mt5.order_send(request)
+			return bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
+		except Exception:
+			return False
+
+	def close_position(self, ticket: int) -> bool:
+		if mt5 is None:
+			return False
+		try:
+			pos = next((p for p in mt5.positions_get() or [] if p.ticket == ticket), None)
+			if not pos:
+				return False
+			price = None
+			order_type = None
+			if pos.type == mt5.POSITION_TYPE_BUY:
+				order_type = mt5.ORDER_TYPE_SELL
+				price = mt5.symbol_info_tick(pos.symbol).bid
+			else:
+				order_type = mt5.ORDER_TYPE_BUY
+				price = mt5.symbol_info_tick(pos.symbol).ask
+			request = {
+				"action": mt5.TRADE_ACTION_DEAL,
+				"symbol": pos.symbol,
+				"position": ticket,
+				"volume": pos.volume,
+				"type": order_type,
+				"price": price,
+				"deviation": int(self.cfg.get('execution', {}).get('deviation_points', 30)),
+				"magic": 20250923,
+				"comment": "Close position",
+			}
+			result = mt5.order_send(request)
+			return bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
+		except Exception:
+			return False

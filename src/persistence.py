@@ -10,6 +10,7 @@ class PersistenceManager:
 	def __init__(self, db_path: str = DB_PATH):
 		self.db_path = db_path
 		self._ensure_db()
+		self._migrate_db()
 
 	def _ensure_db(self):
 		dirname = os.path.dirname(self.db_path)
@@ -69,6 +70,32 @@ class PersistenceManager:
 			)
 			conn.commit()
 
+	def _migrate_db(self):
+		"""Add new lifecycle columns if missing"""
+		with sqlite3.connect(self.db_path) as conn:
+			existing_cols = {}
+			for row in conn.execute("PRAGMA table_info(trades)").fetchall():
+				existing_cols[row[1]] = True
+			# Columns to add
+			columns_to_add = {
+				'open_time': 'TEXT',
+				'close_time': 'TEXT',
+				'close_price': 'REAL',
+				'pnl': 'REAL',
+				'pnl_r': 'REAL',
+				'reason': 'TEXT',
+				'alert_level': 'TEXT',
+				'campaign_id': 'TEXT',
+				'tier': 'TEXT'
+			}
+			for col, col_type in columns_to_add.items():
+				if col not in existing_cols:
+					try:
+						conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+					except Exception:
+						pass
+			conn.commit()
+
 	def save_signal(self, data: Dict[str, Any]) -> None:
 		# Accept dict-like LiveSignal
 		with sqlite3.connect(self.db_path) as conn:
@@ -85,11 +112,32 @@ class PersistenceManager:
 
 	def save_trade(self, trade: Dict[str, Any]) -> None:
 		with sqlite3.connect(self.db_path) as conn:
-			columns = ['timestamp','symbol','direction','entry','sl','tp','lots','ticket','status']
-			values = [trade.get(c) for c in columns]
-			placeholders = ','.join(['?']*len(columns))
-			conn.execute(f"INSERT INTO trades ({','.join(columns)}) VALUES ({placeholders})", values)
+			# Insert with dynamic columns (only ones present in table)
+			conn.row_factory = sqlite3.Row
+			table_cols = [r['name'] for r in conn.execute("PRAGMA table_info(trades)").fetchall()]
+			cols = [c for c in trade.keys() if c in table_cols]
+			placeholders = ','.join(['?']*len(cols))
+			values = [trade.get(c) for c in cols]
+			conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({placeholders})", values)
 			conn.commit()
+
+	def update_trade(self, ticket: int, fields: Dict[str, Any]) -> None:
+		with sqlite3.connect(self.db_path) as conn:
+			if not fields:
+				return
+			set_clause = ', '.join([f"{k} = ?" for k in fields.keys()])
+			values = list(fields.values()) + [ticket]
+			conn.execute(f"UPDATE trades SET {set_clause} WHERE ticket = ?", values)
+			conn.commit()
+
+	def get_open_trades(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+		with sqlite3.connect(self.db_path) as conn:
+			conn.row_factory = sqlite3.Row
+			if symbol:
+				rows = conn.execute("SELECT * FROM trades WHERE status IN ('SENT','OPEN') AND symbol = ?", (symbol,)).fetchall()
+			else:
+				rows = conn.execute("SELECT * FROM trades WHERE status IN ('SENT','OPEN')").fetchall()
+			return [dict(r) for r in rows]
 
 	def latest_signal(self) -> Optional[Dict[str, Any]]:
 		with sqlite3.connect(self.db_path) as conn:
