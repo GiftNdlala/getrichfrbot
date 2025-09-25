@@ -841,7 +841,7 @@ class LiveDataStream:
 
                             # 2-pip farmer (runs alongside, subject to farmer cycle)
                             try:
-                                if self.farmer_enabled:
+                                if self.farmer_enabled and level == 'HIGH':
                                     now = datetime.now()
                                     if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= self.farmer_cycle_seconds:
                                         self._farmer_last_cycle = now

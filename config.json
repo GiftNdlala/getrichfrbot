@@ -64,7 +64,7 @@
       "tp_pips": 2,
       "sl_pips": 6,
       "trades_per_cycle": 3,
-      "cycle_seconds": 120
+      "cycle_seconds": 30
     }
   },
   "notifications": {
