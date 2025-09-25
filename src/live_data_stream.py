@@ -117,18 +117,20 @@ class LiveDataStream:
         # Config
         self.config = get_config()
 
-        # Initialize WORKING real gold API (tested and proven)
-        self.simple_gold_api = SimpleRealGold() if SimpleRealGold else None
+        # Initialize WORKING real gold API only for gold symbols
+        self.simple_gold_api = SimpleRealGold() if (SimpleRealGold and self._is_gold_symbol()) else None
         if self.simple_gold_api:
             print("✅ WORKING Real Gold API initialized - getting ACTUAL $3,700+ market data")
         
-        # Keep other APIs as backups
-        self.working_gold_api = WorkingGoldAPI() if WorkingGoldAPI else None
+        # Keep other gold APIs as backups (gold only)
+        self.working_gold_api = WorkingGoldAPI() if (WorkingGoldAPI and self._is_gold_symbol()) else None
         
         try:
             from robust_data_source import RobustXAUUSDDataSource
-            self.data_source = RobustXAUUSDDataSource()
-            print("✅ Backup data sources available")
+            # This robust data source is gold-focused; use only for gold symbols
+            self.data_source = RobustXAUUSDDataSource() if self._is_gold_symbol() else None
+            if self.data_source:
+                print("✅ Backup data sources available")
         except:
             self.data_source = None
         
@@ -181,6 +183,61 @@ class LiveDataStream:
         # Historical data for indicators (need minimum 200 periods)
         self.historical_data = self._fetch_initial_data()
         
+    def _is_gold_symbol(self) -> bool:
+        try:
+            s = (self.symbol or "").upper()
+            return ("XAU" in s) or ("GOLD" in s)
+        except Exception:
+            return False
+
+    def _map_symbol_to_yfinance(self) -> str:
+        s = (self.symbol or "").upper()
+        # Simple mappings for common CFD symbols
+        if "US30" in s or s == "DJI" or s == "US30M":
+            return "^DJI"
+        if "XAU" in s or "GOLD" in s:
+            return "GC=F"
+        # Default: try the raw symbol
+        return self.symbol
+
+    def _yf_get_historical(self) -> pd.DataFrame:
+        try:
+            yf_symbol = self._map_symbol_to_yfinance()
+            df = yf.download(tickers=yf_symbol, period="365d", interval="1d", progress=False)
+            if df is None or df.empty:
+                return pd.DataFrame()
+            df = df.rename(columns={
+                'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'
+            })
+            # Ensure expected columns
+            df = df[['Open','High','Low','Close','Volume']]
+            df.index.name = 'Date'
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    def _yf_get_current_quote(self) -> Optional[Dict]:
+        try:
+            yf_symbol = self._map_symbol_to_yfinance()
+            df = yf.download(tickers=yf_symbol, period="2d", interval="1m", progress=False)
+            if df is None or df.empty:
+                return None
+            last = df.tail(1)
+            prev = df.tail(2).head(1)
+            price = float(last['Close'].iloc[0])
+            prev_close = float(prev['Close'].iloc[0]) if not prev.empty else price
+            ts = last.index[-1].to_pydatetime()
+            vol = float(last['Volume'].iloc[0]) if 'Volume' in last.columns else 0.0
+            return {
+                'price': price,
+                'prev_close': prev_close,
+                'timestamp': ts,
+                'volume': vol,
+                'source': f"YF-{yf_symbol}"
+            }
+        except Exception:
+            return None
+
     def _fetch_initial_data(self) -> pd.DataFrame:
         """Fetch initial historical data for indicator calculations"""
         try:
@@ -207,9 +264,13 @@ class LiveDataStream:
             else:
                 data = None
 
-            # Fallback to robust data source
-            if data is None or data.empty:
-                data = self.data_source.get_historical_data(days=365)
+            # Fallbacks
+            if (data is None or data.empty):
+                if self.data_source is not None:
+                    data = self.data_source.get_historical_data(days=365)
+                else:
+                    # Generic fallback via Yahoo Finance for non-gold (or any) symbols
+                    data = self._yf_get_historical()
             
             if data.empty:
                 print("⚠️ No data received, using mock data")
@@ -218,7 +279,11 @@ class LiveDataStream:
             # Calculate all indicators on historical data
             data = self.indicators.calculate_all_indicators(data)
             
-            print(f"✅ Loaded {len(data)} historical data points from {self.data_source.data_source}")
+            try:
+                source_name = getattr(self.data_source, 'data_source', 'Yahoo/MT5') if self.data_source else 'Yahoo/MT5'
+            except Exception:
+                source_name = 'Yahoo/MT5'
+            print(f"✅ Loaded {len(data)} historical data points from {source_name}")
             return data
             
         except Exception as e:
@@ -267,61 +332,69 @@ class LiveDataStream:
             except Exception as e:
                 print(f"⚠️ MT5 quote error: {e}")
         
-        # Fallback 1: Simple Real Gold API
-        if self.simple_gold_api:
-            try:
-                real_data = self.simple_gold_api.get_real_gold_price()
-                if real_data and real_data.get('price', 0) > 0:
-                    print(f"✅ REAL MARKET DATA: ${real_data['price']:.2f} from {real_data['source']}")
-                    
-                    # Calculate realistic price change
-                    if hasattr(self, 'last_real_price'):
-                        prev_price = self.last_real_price
-                    else:
-                        prev_price = real_data['price'] - np.random.normal(0, 5)
-                    
-                    self.last_real_price = real_data['price']
-                    
-                    return {
-                        'price': float(real_data['price']),
-                        'prev_close': prev_price,
-                        'timestamp': real_data['timestamp'],
-                        'volume': float(real_data.get('volume', 75000)),  # Typical gold volume
-                        'source': f"REAL-{real_data['source']}"
-                    }
-            except Exception as e:
-                print(f"⚠️ Simple Real Gold API error: {e}")
-        
-        # Fallback 2: Working Gold API as backup
-        if self.working_gold_api:
-            try:
-                real_data = self.working_gold_api.get_real_gold_price()
-                if real_data and real_data.get('price', 0) > 0:
-                    print(f"✅ BACKUP REAL DATA: ${real_data['price']:.2f} from {real_data['source']}")
-                    return {
-                        'price': float(real_data['price']),
-                        'prev_close': real_data['price'] - np.random.normal(0, 3),
-                        'timestamp': real_data['timestamp'],
-                        'volume': float(real_data.get('volume', 50000)),
-                        'source': f"REAL-{real_data['source']}"
-                    }
-            except Exception as e:
-                print(f"⚠️ Working Gold API error: {e}")
-        
-        # Fallback 3: robust data source
-        if self.data_source:
-            try:
-                current_data = self.data_source.get_current_price()
-                if current_data and current_data.get('price', 0) > 0:
-                    print(f"✅ ROBUST DATA: ${current_data['price']:.2f}")
-                    return {
-                        'price': current_data['price'],
-                        'prev_close': current_data.get('prev_close', current_data['price']),
-                        'timestamp': current_data['timestamp'],
-                        'volume': current_data.get('volume', 50000)
-                    }
-            except Exception as e:
-                print(f"⚠️ Robust data source error: {e}")
+        # Fallbacks based on symbol type
+        if self._is_gold_symbol():
+            # Fallback 1: Simple Real Gold API
+            if self.simple_gold_api:
+                try:
+                    real_data = self.simple_gold_api.get_real_gold_price()
+                    if real_data and real_data.get('price', 0) > 0:
+                        print(f"✅ REAL MARKET DATA: ${real_data['price']:.2f} from {real_data['source']}")
+                        
+                        # Calculate realistic price change
+                        if hasattr(self, 'last_real_price'):
+                            prev_price = self.last_real_price
+                        else:
+                            prev_price = real_data['price'] - np.random.normal(0, 5)
+                        
+                        self.last_real_price = real_data['price']
+                        
+                        return {
+                            'price': float(real_data['price']),
+                            'prev_close': prev_price,
+                            'timestamp': real_data['timestamp'],
+                            'volume': float(real_data.get('volume', 75000)),  # Typical gold volume
+                            'source': f"REAL-{real_data['source']}"
+                        }
+                except Exception as e:
+                    print(f"⚠️ Simple Real Gold API error: {e}")
+            
+            # Fallback 2: Working Gold API as backup
+            if self.working_gold_api:
+                try:
+                    real_data = self.working_gold_api.get_real_gold_price()
+                    if real_data and real_data.get('price', 0) > 0:
+                        print(f"✅ BACKUP REAL DATA: ${real_data['price']:.2f} from {real_data['source']}")
+                        return {
+                            'price': float(real_data['price']),
+                            'prev_close': real_data['price'] - np.random.normal(0, 3),
+                            'timestamp': real_data['timestamp'],
+                            'volume': float(real_data.get('volume', 50000)),
+                            'source': f"REAL-{real_data['source']}"
+                        }
+                except Exception as e:
+                    print(f"⚠️ Working Gold API error: {e}")
+            
+            # Fallback 3: robust data source (gold)
+            if self.data_source:
+                try:
+                    current_data = self.data_source.get_current_price()
+                    if current_data and current_data.get('price', 0) > 0:
+                        print(f"✅ ROBUST DATA: ${current_data['price']:.2f}")
+                        return {
+                            'price': current_data['price'],
+                            'prev_close': current_data.get('prev_close', current_data['price']),
+                            'timestamp': current_data['timestamp'],
+                            'volume': current_data.get('volume', 50000)
+                        }
+                except Exception as e:
+                    print(f"⚠️ Robust data source error: {e}")
+        else:
+            # Non-gold symbols: use Yahoo Finance as generic fallback
+            yf_quote = self._yf_get_current_quote()
+            if yf_quote and yf_quote.get('price', 0) > 0:
+                print(f"✅ YF DATA {yf_quote['source']}: ${yf_quote['price']:.2f}")
+                return yf_quote
         
         # Method 4: ONLY use realistic mock as absolute last resort
         print("🚨 WARNING: All REAL sources failed - using realistic mock")
