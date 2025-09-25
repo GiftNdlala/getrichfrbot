@@ -833,6 +833,10 @@ class LiveDataStream:
 
                         # Auto-trading (opt-in) with campaign and per-alert logic
                         if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session() and not spread_block and not atr_block and not self.event_mode_enabled:
+                            # Respect per-symbol daily loss cap halt
+                            if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
+                                print(f"⏸️ Halt new orders (daily cap) for {self.symbol}")
+                                continue
                             level = (live_signal.alert_level or 'LOW').upper()
                             side = 1 if live_signal.signal == 1 else -1
                             # Per-engine gating

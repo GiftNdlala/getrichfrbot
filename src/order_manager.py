@@ -94,8 +94,18 @@ class OrderManager:
 		"""Poll MT5 and update statuses; apply exit rules"""
 		if not self.mt5:
 			return
-		# Per-symbol loss/exposure halts (simple placeholders)
-		# In a full implementation, compute realized PnL today and approximate open risk.
+		# Per-symbol caps: compute realized PnL today
+		realized_today = self.mt5.today_realized_pnl()
+		equity = self.mt5.get_equity() or 0.0
+		loss_pct_today = 0.0
+		if equity > 0 and realized_today < 0:
+			loss_pct_today = abs(realized_today) / equity * 100.0
+		if loss_pct_today >= self.daily_loss_limit_pct:
+			print(f"⛔ Daily loss cap hit for {self.symbol}: {loss_pct_today:.2f}% ≥ {self.daily_loss_limit_pct:.2f}%. Halting new orders.")
+			# Mark halt state on manager; LiveDataStream can choose to consult here if needed.
+			self.halt_new_orders = True
+		else:
+			self.halt_new_orders = False
 		positions = self.mt5.get_positions(self.symbol)
 		open_tickets = {p.ticket for p in positions}
 		# Close detection for tickets we track but are not open anymore

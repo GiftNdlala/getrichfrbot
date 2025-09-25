@@ -107,3 +107,40 @@ class MT5Connector:
 			return history or []
 		except Exception:
 			return []
+
+	def get_equity(self) -> Optional[float]:
+		if not self.initialized and not self.initialize():
+			return None
+		try:
+			ai = mt5.account_info()
+			return float(ai.equity) if ai else None
+		except Exception:
+			return None
+
+	def get_symbol_info(self):
+		if not self.initialized and not self.initialize():
+			return None
+		try:
+			return mt5.symbol_info(self.symbol)
+		except Exception:
+			return None
+
+	def today_realized_pnl(self) -> float:
+		"""Sum of today's realized profit for this symbol."""
+		if not self.initialized and not self.initialize():
+			return 0.0
+		try:
+			now = dt.datetime.now()
+			start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+			deals = mt5.history_deals_get(start, now)
+			total = 0.0
+			if deals:
+				for d in deals:
+					try:
+						if getattr(d, 'symbol', '') == self.symbol:
+							total += float(getattr(d, 'profit', 0.0))
+					except Exception:
+						pass
+			return total
+		except Exception:
+			return 0.0
