@@ -841,7 +841,9 @@ class LiveDataStream:
 
                             # 2-pip farmer (runs alongside, subject to farmer cycle)
                             try:
-                                if self.farmer_enabled and level == 'HIGH':
+                                # Farmer runs independently every cycle when a non-HOLD signal exists,
+                                # but piggybacks the HIGH campaign gate.
+                                if self.farmer_enabled and live_signal.signal != 0:
                                     now = datetime.now()
                                     if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= self.farmer_cycle_seconds:
                                         self._farmer_last_cycle = now
@@ -851,7 +853,8 @@ class LiveDataStream:
                                         count = int(farmer_cfg.get('trades_per_cycle', 3))
                                         # place burst of small TP orders
                                         for i in range(count):
-                                            if self.campaign and not self.campaign.allow(self.symbol, side, level):
+                                            # piggyback HIGH gate regardless of current alert level
+                                            if self.campaign and not self.campaign.allow(self.symbol, side, 'HIGH'):
                                                 break
                                             entry = live_signal.entry_price
                                             sl = entry - sl_pips if side == 1 else entry + sl_pips
@@ -869,13 +872,13 @@ class LiveDataStream:
                                                         'lots': trade.get('volume', 0.0),
                                                         'ticket': trade.get('ticket', 0),
                                                         'status': 'SENT',
-                                                        'alert_level': level,
+                                                        'alert_level': 'HIGH',
                                                         'tier': 'FARMER'
                                                     })
                                                     if self.order_manager:
-                                                        self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp_small, level, tier='FARMER')
+                                                        self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp_small, 'HIGH', tier='FARMER')
                                                     if self.campaign:
-                                                        self.campaign.record(self.symbol, side, level)
+                                                        self.campaign.record(self.symbol, side, 'HIGH')
                                                     print(f"🌾 Farmer order sent: ticket={trade.get('ticket')} tp={tp_pips}p")
                                                 except Exception as e:
                                                     print(f"⚠️ Farmer persist error: {e}")
