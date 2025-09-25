@@ -434,8 +434,8 @@ class LiveDataStream:
             # Combined score for categorization
             total_score = confidence + (indicator_strength * 10) + (volatility_factor * 10)
             
-            # Determine category based on total score
-            if total_score >= 85 and confidence >= 75:
+            # Determine category based on tightened thresholds
+            if total_score >= 90 and confidence >= 85:
                 # HIGH ALERT: 40-50 pips target
                 return {
                     'alert_level': 'HIGH',
@@ -443,7 +443,7 @@ class LiveDataStream:
                     'target_pips': int(16 + (volatility_factor * 5)),  # 16-10 pips
                     'success_rate': min(confidence * 0.9, 85.0)  # Slightly lower success due to higher target
                 }
-            elif total_score >= 70 and confidence >= 60:
+            elif total_score >= 75 and confidence >= 65:
                 # MEDIUM ALERT: 20-30 pips target
                 return {
                     'alert_level': 'MEDIUM',
@@ -744,6 +744,24 @@ class LiveDataStream:
                     current_quote = self._fetch_current_quote()
                     
                     if current_quote:
+                        # Pre-trade guard: spread and ATR floors
+                        try:
+                            filters = self.config.get('filters', {})
+                            max_spread = float(filters.get('max_spread_points', 30))
+                            min_atr_pips = float(filters.get('min_atr_pips', 3))
+                            latest_atr = float(self.historical_data.iloc[-1].get('ATR_14', 0)) if not self.historical_data.empty else 0
+                            if current_quote.get('spread_points') and current_quote['spread_points'] > max_spread:
+                                print(f"⛔ Spread guard: {current_quote['spread_points']:.1f} > {max_spread}")
+                                # Still update data/UI but skip sends this tick
+                                spread_block = True
+                            else:
+                                spread_block = False
+                            atr_block = latest_atr < min_atr_pips
+                            if atr_block:
+                                print(f"⛔ ATR guard: ATR_14 {latest_atr:.2f} < {min_atr_pips}")
+                        except Exception:
+                            spread_block = False
+                            atr_block = False
                         # Update historical data
                         self._update_historical_data(current_quote)
                         
@@ -768,7 +786,7 @@ class LiveDataStream:
                         print(f"🔄 {live_signal.timestamp} | {live_signal.symbol} | ${live_signal.current_price:.2f} | {live_signal.signal_type} ({live_signal.confidence:.1f}%)")
 
                         # Auto-trading (opt-in) with campaign and per-alert logic
-                        if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session():
+                        if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session() and not spread_block and not atr_block:
                             level = (live_signal.alert_level or 'LOW').upper()
                             side = 1 if live_signal.signal == 1 else -1
                             # campaign check
@@ -795,7 +813,7 @@ class LiveDataStream:
                                         [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
                                     )
                                 # Spawn orders
-                                def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None):
+                                def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None, engine: str = "INTRADAY"):
                                     nonlocal live_signal
                                     sl = live_signal.stop_loss
                                     entry = live_signal.entry_price
@@ -818,7 +836,8 @@ class LiveDataStream:
                                                 'ticket': trade.get('ticket', 0),
                                                 'status': 'SENT',
                                                 'alert_level': level,
-                                                'tier': tier_name or ''
+                                                'tier': tier_name or '',
+                                                'engine': engine
                                             })
                                             print(f"✅ Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'}")
                                             if self.order_manager:
@@ -831,13 +850,14 @@ class LiveDataStream:
                                     # Send tiered partials first
                                     for tier_name, pips in tiers:
                                         if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                            send_one(tier_name, pips)
+                                            send_one(tier_name, pips, engine="SWING_HIGH")
                                     # Remaining up to campaign limit use base TP
                                     if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                        send_one(None, None)
+                                        send_one(None, None, engine="SWING_HIGH")
                                 else:
                                     # LOW/MEDIUM use absolute TP we computed
-                                    send_one(None, None, tp_absolute=tp)
+                                    engine_name = "INTRADAY_LOW" if level=="LOW" else ("INTRADAY_MED" if level=="MEDIUM" else "INTRADAY")
+                                    send_one(None, None, tp_absolute=tp, engine=engine_name)
 
                             # 2-pip farmer (runs alongside, subject to farmer cycle)
                             try:
@@ -848,7 +868,19 @@ class LiveDataStream:
                                     if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= self.farmer_cycle_seconds:
                                         self._farmer_last_cycle = now
                                         farmer_cfg = self.config.get('execution', {}).get('farmer', {})
-                                        tp_pips = int(farmer_cfg.get('tp_pips', 2))
+                                        # Dynamic TP by ATR if enabled
+                                        dyn = bool(farmer_cfg.get('dynamic_tp', True))
+                                        atr_val = float(self.historical_data.iloc[-1].get('ATR_14', 0)) if not self.historical_data.empty else 0
+                                        base_tp = int(farmer_cfg.get('tp_pips', 2))
+                                        if dyn:
+                                            if atr_val >= 20:
+                                                tp_pips = min(5, base_tp + 2)
+                                            elif atr_val >= 12:
+                                                tp_pips = min(4, base_tp + 1)
+                                            else:
+                                                tp_pips = base_tp
+                                        else:
+                                            tp_pips = base_tp
                                         sl_pips = int(farmer_cfg.get('sl_pips', 6))
                                         count = int(farmer_cfg.get('trades_per_cycle', 3))
                                         # place burst of small TP orders
@@ -873,13 +905,14 @@ class LiveDataStream:
                                                         'ticket': trade.get('ticket', 0),
                                                         'status': 'SENT',
                                                         'alert_level': 'HIGH',
-                                                        'tier': 'FARMER'
+                                                        'tier': 'FARMER',
+                                                        'engine': 'FARMER'
                                                     })
                                                     if self.order_manager:
                                                         self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp_small, 'HIGH', tier='FARMER')
                                                     if self.campaign:
                                                         self.campaign.record(self.symbol, side, 'HIGH')
-                                                    print(f"🌾 Farmer order sent: ticket={trade.get('ticket')} tp={tp_pips}p")
+                                                    print(f"🌾 Farmer order sent: ticket={trade.get('ticket')} tp={tp_pips}p atr={atr_val:.2f}")
                                                 except Exception as e:
                                                     print(f"⚠️ Farmer persist error: {e}")
                             except Exception:

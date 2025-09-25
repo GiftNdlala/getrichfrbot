@@ -86,7 +86,8 @@ class PersistenceManager:
 				'reason': 'TEXT',
 				'alert_level': 'TEXT',
 				'campaign_id': 'TEXT',
-				'tier': 'TEXT'
+				'tier': 'TEXT',
+				'engine': 'TEXT'
 			}
 			for col, col_type in columns_to_add.items():
 				if col not in existing_cols:
