@@ -145,6 +145,8 @@ class LiveDataStream:
         min_spacing = int(exec_cfg.get('min_seconds_between_entries', 60))
         self.campaign = CampaignManager(window_minutes=window_min, max_per_level=max_map, min_spacing_seconds=min_spacing) if CampaignManager else None
         self.order_manager = OrderManager(self.symbol) if OrderManager else None
+        # Session control override
+        self.ignore_session_filter = False
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -353,6 +355,9 @@ class LiveDataStream:
         self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
 
     def _is_blackout_or_off_session(self) -> bool:
+        # Allow override to trade anytime
+        if getattr(self, 'ignore_session_filter', False):
+            return False
         try:
             cfg = self.config
             tz_name = cfg.get('sessions', {}).get('timezone', 'Africa/Johannesburg')
@@ -770,10 +775,12 @@ class LiveDataStream:
                                 cfg_exec = self.config.get('execution', {})
                                 if level == 'LOW':
                                     tp_pips = int(cfg_exec.get('low_tp_pips', 5))
-                                    tp = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                    tp_low_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                    tp = tp_low_abs
                                 elif level == 'MEDIUM':
                                     tp_pips = int(cfg_exec.get('medium_tp_primary_pips', 9))
-                                    tp = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                    tp_med_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                    tp = tp_med_abs
                                 # HIGH: allow tiered spawning counts
                                 tiers = []
                                 if level == 'HIGH':
@@ -783,12 +790,14 @@ class LiveDataStream:
                                         [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
                                     )
                                 # Spawn orders
-                                def send_one(tier_name: Optional[str], tp_pips_override: Optional[int]):
+                                def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None):
                                     nonlocal live_signal
                                     sl = live_signal.stop_loss
                                     entry = live_signal.entry_price
                                     local_tp = live_signal.take_profit_1
-                                    if tp_pips_override is not None:
+                                    if tp_absolute is not None:
+                                        local_tp = tp_absolute
+                                    elif tp_pips_override is not None:
                                         local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
                                     trade = self.autotrader.place_market_order(side, entry, sl, local_tp)
                                     if trade and self.persistence:
@@ -819,10 +828,11 @@ class LiveDataStream:
                                         if not self.campaign or self.campaign.allow(self.symbol, side, level):
                                             send_one(tier_name, pips)
                                     # Remaining up to campaign limit use base TP
-                                    base_allow = self.campaign.current_count(self.symbol, side, level) if self.campaign else 0
-                                    send_one(None, None)
+                                    if not self.campaign or self.campaign.allow(self.symbol, side, level):
+                                        send_one(None, None)
                                 else:
-                                    send_one(None, tp if isinstance(tp, (int, float)) else None)
+                                    # LOW/MEDIUM use absolute TP we computed
+                                    send_one(None, None, tp_absolute=tp)
                         
                     else:
                         print("⚠️ Failed to fetch current quote")

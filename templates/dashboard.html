@@ -549,6 +549,16 @@
             <div class="credits">Created by GIFT NDLALA</div>
             <div id="status-indicator" class="status-indicator status-waiting">⏳ Waiting for signals...</div>
         </div>
+
+        <!-- Nav / Controls -->
+        <div class="signal-card" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:space-between;">
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button id="btn-pause" style="padding:10px 16px; border-radius:8px; border:none; background:#f44336; color:#fff; font-weight:600; cursor:pointer;">Pause</button>
+                <button id="btn-resume" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">Resume</button>
+                <button id="btn-session-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#2196F3; color:#fff; font-weight:600; cursor:pointer;">Force Session On</button>
+            </div>
+            <div id="throttle-status" class="status-indicator status-hold">Campaign: --</div>
+        </div>
         
         <div id="loading" class="loading">
             <div class="loading-spinner"></div>
@@ -691,6 +701,29 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Open Trades Table -->
+            <div class="signal-history" style="margin-top:20px; overflow:auto;">
+                <h3>🧾 Open Trades</h3>
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead>
+                        <tr style="text-align:left; border-bottom:1px solid rgba(255,255,255,0.2);">
+                            <th style="padding:8px;">Ticket</th>
+                            <th style="padding:8px;">Side</th>
+                            <th style="padding:8px;">Entry</th>
+                            <th style="padding:8px;">SL</th>
+                            <th style="padding:8px;">TP</th>
+                            <th style="padding:8px;">Lots</th>
+                            <th style="padding:8px;">Alert</th>
+                            <th style="padding:8px;">Tier</th>
+                            <th style="padding:8px;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="open-trades-body">
+                        <tr><td colspan="9" style="padding:12px; opacity:0.8;">No open trades</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
     
@@ -698,6 +731,7 @@
         let updateInterval;
         let countdownInterval;
         let nextUpdateTime = 30;
+        let forceSessionOn = false;
         
         async function fetchCurrentSignal() {
             try {
@@ -727,6 +761,16 @@
             } catch (error) {
                 console.error('Error fetching signal history:', error);
             }
+        }
+
+        async function fetchTrades() {
+            try {
+                const res = await fetch('/api/trades');
+                const result = await res.json();
+                if (result.status === 'success') {
+                    renderOpenTrades(result.open_trades || []);
+                }
+            } catch (e) { console.error('Error fetching trades', e); }
         }
         
         function updateDashboard(data) {
@@ -846,6 +890,29 @@
                 statusDetails.textContent = `${data.alert_level} alert - ${data.target_pips} pips target`;
             }
         }
+
+        function renderOpenTrades(trades) {
+            const body = document.getElementById('open-trades-body');
+            if (!trades || trades.length === 0) {
+                body.innerHTML = '<tr><td colspan="9" style="padding:12px; opacity:0.8;">No open trades</td></tr>';
+                return;
+            }
+            let html = '';
+            trades.forEach(t => {
+                html += `<tr>
+                    <td style="padding:6px;">${t.ticket || ''}</td>
+                    <td style="padding:6px;">${t.direction === 1 ? 'BUY' : (t.direction === -1 ? 'SELL' : '')}</td>
+                    <td style="padding:6px;">${(t.entry||0).toFixed ? `$${Number(t.entry).toFixed(2)}` : t.entry}</td>
+                    <td style="padding:6px;">${(t.sl||0).toFixed ? `$${Number(t.sl).toFixed(2)}` : t.sl}</td>
+                    <td style="padding:6px;">${(t.tp||0).toFixed ? `$${Number(t.tp).toFixed(2)}` : t.tp}</td>
+                    <td style="padding:6px;">${t.lots || ''}</td>
+                    <td style="padding:6px;">${t.alert_level || ''}</td>
+                    <td style="padding:6px;">${t.tier || ''}</td>
+                    <td style="padding:6px;">${t.status || ''}</td>
+                </tr>`
+            });
+            body.innerHTML = html;
+        }
         
         function updateSignalHistory(data) {
             // This would be called from the signal history API
@@ -949,13 +1016,30 @@
         document.addEventListener('DOMContentLoaded', function() {
             fetchCurrentSignal();
             fetchSignalHistory();
+            fetchTrades();
             
             // Set up intervals
             updateInterval = setInterval(fetchCurrentSignal, 30000); // 30 seconds
             countdownInterval = setInterval(updateCountdown, 1000); // 1 second
+            setInterval(fetchTrades, 15000);
             
             // Fetch signal history every 5 minutes
             setInterval(fetchSignalHistory, 300000); // 5 minutes
+        });
+
+        // Controls
+        document.addEventListener('click', async (e) => {
+            if (e.target && e.target.id === 'btn-pause') {
+                try { await fetch('/api/pause', { method: 'POST' }); } catch {}
+            }
+            if (e.target && e.target.id === 'btn-resume') {
+                try { await fetch('/api/resume', { method: 'POST' }); } catch {}
+            }
+            if (e.target && e.target.id === 'btn-session-toggle') {
+                forceSessionOn = !forceSessionOn;
+                e.target.textContent = forceSessionOn ? 'Force Session Off' : 'Force Session On';
+                try { await fetch('/api/session_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ force: forceSessionOn }) }); } catch {}
+            }
         });
         
         // Cleanup on page unload

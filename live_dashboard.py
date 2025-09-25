@@ -180,6 +180,40 @@ def get_status():
     
     return jsonify(status)
 
+@app.route('/api/trades')
+def get_trades():
+    symbol = request.args.get('symbol')
+    try:
+        open_trades = persistence.get_open_trades(symbol)
+    except Exception:
+        open_trades = []
+    return jsonify({'status': 'success', 'open_trades': open_trades})
+
+@app.route('/api/pause', methods=['POST'])
+def pause_trading():
+    global live_stream
+    if live_stream:
+        live_stream.is_running = False
+        return jsonify({'status': 'paused'})
+    return jsonify({'status': 'no_stream'})
+
+@app.route('/api/resume', methods=['POST'])
+def resume_trading():
+    global live_stream
+    if live_stream and not live_stream.is_running:
+        live_stream.start_streaming()
+        return jsonify({'status': 'resumed'})
+    return jsonify({'status': 'no_stream'})
+
+@app.route('/api/session_toggle', methods=['POST'])
+def session_toggle():
+    global live_stream
+    force = request.json.get('force', False)
+    if live_stream:
+        live_stream.ignore_session_filter = bool(force)
+        return jsonify({'status': 'success', 'ignore_session_filter': live_stream.ignore_session_filter})
+    return jsonify({'status': 'no_stream'})
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
