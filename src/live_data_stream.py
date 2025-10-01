@@ -117,15 +117,15 @@ class LiveDataStream:
         # Config
         self.config = get_config()
 
-		# Resolve data mapping once for transparency/debug
-		try:
-			self.yf_symbol = self._map_symbol_to_yfinance()
-			feeds = self.config.get('data_feed', {})
-			primary = feeds.get('primary', 'MT5')
-			backups = feeds.get('backups', [])
-			print(f"✅ Stream init for {self.symbol} | primary={primary} | backups={backups} | yfinance={self.yf_symbol} | gold={self._is_gold_symbol()}")
-		except Exception:
-			self.yf_symbol = self.symbol
+        # Resolve data mapping once for transparency/debug
+        try:
+            self.yf_symbol = self._map_symbol_to_yfinance()
+            feeds = self.config.get('data_feed', {})
+            primary = feeds.get('primary', 'MT5')
+            backups = feeds.get('backups', [])
+            print(f"✅ Stream init for {self.symbol} | primary={primary} | backups={backups} | yfinance={self.yf_symbol} | gold={self._is_gold_symbol()}")
+        except Exception:
+            self.yf_symbol = self.symbol
 
         # Initialize WORKING real gold API only for gold symbols
         self.simple_gold_api = SimpleRealGold() if (SimpleRealGold and self._is_gold_symbol()) else None
@@ -211,8 +211,8 @@ class LiveDataStream:
         return self.symbol
 
     def _yf_get_historical(self) -> pd.DataFrame:
-		try:
-			df = yf.download(tickers=self.yf_symbol, period="365d", interval="1d", progress=False)
+        try:
+            df = yf.download(tickers=self.yf_symbol, period="365d", interval="1d", progress=False)
             if df is None or df.empty:
                 return pd.DataFrame()
             df = df.rename(columns={
@@ -226,8 +226,8 @@ class LiveDataStream:
             return pd.DataFrame()
 
     def _yf_get_current_quote(self) -> Optional[Dict]:
-		try:
-			df = yf.download(tickers=self.yf_symbol, period="2d", interval="1m", progress=False)
+        try:
+            df = yf.download(tickers=self.yf_symbol, period="2d", interval="1m", progress=False)
             if df is None or df.empty:
                 return None
             last = df.tail(1)
@@ -236,12 +236,12 @@ class LiveDataStream:
             prev_close = float(prev['Close'].iloc[0]) if not prev.empty else price
             ts = last.index[-1].to_pydatetime()
             vol = float(last['Volume'].iloc[0]) if 'Volume' in last.columns else 0.0
-				return {
+            return {
                 'price': price,
                 'prev_close': prev_close,
                 'timestamp': ts,
                 'volume': vol,
-					'source': f"YF-{self.yf_symbol}"
+                'source': f"YF-{self.yf_symbol}"
             }
         except Exception:
             return None
@@ -273,17 +273,17 @@ class LiveDataStream:
                 data = None
 
             # Fallbacks
-			if (data is None or data.empty):
-				if self.data_source is not None:
-					data = self.data_source.get_historical_data(days=365)
-				else:
-					# Generic fallback via Yahoo Finance only if allowed in backups
-					feeds = self.config.get('data_feed', {})
-					backups = feeds.get('backups', [])
-					if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
-						data = self._yf_get_historical()
-					else:
-						data = pd.DataFrame()
+            if (data is None or data.empty):
+                if self.data_source is not None:
+                    data = self.data_source.get_historical_data(days=365)
+                else:
+                    # Generic fallback via Yahoo Finance only if allowed in backups
+                    feeds = self.config.get('data_feed', {})
+                    backups = feeds.get('backups', [])
+                    if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
+                        data = self._yf_get_historical()
+                    else:
+                        data = pd.DataFrame()
             
             if data.empty:
                 print("⚠️ No data received, using mock data")
@@ -345,8 +345,8 @@ class LiveDataStream:
             except Exception as e:
                 print(f"⚠️ MT5 quote error: {e}")
         
-		# Fallbacks based on symbol type
-		if self._is_gold_symbol():
+        # Fallbacks based on symbol type
+        if self._is_gold_symbol():
             # Fallback 1: Simple Real Gold API
             if self.simple_gold_api:
                 try:
@@ -402,15 +402,15 @@ class LiveDataStream:
                         }
                 except Exception as e:
                     print(f"⚠️ Robust data source error: {e}")
-		else:
-			# Non-gold symbols: use Yahoo Finance only if configured as a backup
-			feeds = self.config.get('data_feed', {})
-			backups = feeds.get('backups', [])
-			if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
-				yf_quote = self._yf_get_current_quote()
-				if yf_quote and yf_quote.get('price', 0) > 0:
-					print(f"✅ YF DATA {yf_quote['source']}: ${yf_quote['price']:.2f}")
-					return yf_quote
+        else:
+            # Non-gold symbols: use Yahoo Finance only if configured as a backup
+            feeds = self.config.get('data_feed', {})
+            backups = feeds.get('backups', [])
+            if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
+                yf_quote = self._yf_get_current_quote()
+                if yf_quote and yf_quote.get('price', 0) > 0:
+                    print(f"✅ YF DATA {yf_quote['source']}: ${yf_quote['price']:.2f}")
+                    return yf_quote
         
         # Method 4: ONLY use realistic mock as absolute last resort
         print("🚨 WARNING: All REAL sources failed - using realistic mock")
