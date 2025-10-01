@@ -110,6 +110,36 @@ class AutoTrader:
 		if lots <= 0:
 			return None
 		order_type = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
+		# --- Normalize SL/TP to broker constraints and tick grid ---
+		try:
+			point = float(getattr(info, 'point', 0.01) or 0.01)
+			tick_size = float(getattr(info, 'trade_tick_size', point) or point)
+			stops_level_points = float(getattr(info, 'stops_level', 0) or 0)
+			min_distance = stops_level_points * point
+			# Align price to tick grid
+			def align_to_tick(price: float) -> float:
+				return round(round(price / tick_size) * tick_size, 5)
+			# Enforce min distance and proper side for SL/TP
+			if direction == 1:
+				# BUY: SL below, TP above
+				if min_distance > 0:
+					sl = min(sl, entry - min_distance)
+					tp = max(tp, entry + min_distance)
+				# Ensure strictly on correct sides
+				if not (sl < entry and tp > entry):
+					return None
+			else:
+				# SELL: SL above, TP below
+				if min_distance > 0:
+					sl = max(sl, entry + min_distance)
+					tp = min(tp, entry - min_distance)
+				if not (sl > entry and tp < entry):
+					return None
+			# Align to tick grid
+			sl = align_to_tick(sl)
+			tp = align_to_tick(tp)
+		except Exception:
+			pass
 		# Margin-aware lot fit: cap by maximum affordable
 		affordable = self._max_affordable_lot(order_type, entry, info)
 		min_lot = float(info.volume_min)
