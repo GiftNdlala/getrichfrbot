@@ -108,6 +108,7 @@ class AutoTrader:
 			return None
 		lots = self._calc_lot(entry, sl)
 		if lots <= 0:
+			print(f"⏸️ Skip {self.symbol}: risk sizing produced non-positive lots")
 			return None
 		order_type = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
 		# --- Normalize SL/TP to broker constraints and tick grid ---
@@ -146,14 +147,18 @@ class AutoTrader:
 		lot_step = float(info.volume_step or 0.01)
 		if affordable <= 0.0:
 			# Even min lot unaffordable -> skip
+			print(f"⏸️ Skip {self.symbol}: insufficient free margin for broker minimum lot {min_lot}")
 			return None
 		# Take the minimum of risk-lot and affordable lot
 		if lots > affordable:
+			original_lots = lots
 			lots = affordable
+			print(f"🔽 Downscale {self.symbol}: lots {original_lots} -> {lots} due to margin")
 		# Align to lot grid
 		steps = max(0, int(round((lots - min_lot) / (lot_step or 0.01))))
 		lots = round(min_lot + steps * lot_step, 2)
 		if lots < min_lot:
+			print(f"⏸️ Skip {self.symbol}: aligned lot {lots} < broker minimum {min_lot}")
 			return None
 		request = {
 			"action": mt5.TRADE_ACTION_DEAL,
