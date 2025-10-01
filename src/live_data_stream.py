@@ -117,6 +117,13 @@ class LiveDataStream:
         # Config
         self.config = get_config()
 
+		# Resolve data mapping once for transparency/debug
+		try:
+			self.yf_symbol = self._map_symbol_to_yfinance()
+			print(f"✅ Stream init for {self.symbol} | yfinance={self.yf_symbol} | gold={self._is_gold_symbol()}")
+		except Exception:
+			self.yf_symbol = self.symbol
+
         # Initialize WORKING real gold API only for gold symbols
         self.simple_gold_api = SimpleRealGold() if (SimpleRealGold and self._is_gold_symbol()) else None
         if self.simple_gold_api:
@@ -201,9 +208,8 @@ class LiveDataStream:
         return self.symbol
 
     def _yf_get_historical(self) -> pd.DataFrame:
-        try:
-            yf_symbol = self._map_symbol_to_yfinance()
-            df = yf.download(tickers=yf_symbol, period="365d", interval="1d", progress=False)
+		try:
+			df = yf.download(tickers=self.yf_symbol, period="365d", interval="1d", progress=False)
             if df is None or df.empty:
                 return pd.DataFrame()
             df = df.rename(columns={
@@ -217,9 +223,8 @@ class LiveDataStream:
             return pd.DataFrame()
 
     def _yf_get_current_quote(self) -> Optional[Dict]:
-        try:
-            yf_symbol = self._map_symbol_to_yfinance()
-            df = yf.download(tickers=yf_symbol, period="2d", interval="1m", progress=False)
+		try:
+			df = yf.download(tickers=self.yf_symbol, period="2d", interval="1m", progress=False)
             if df is None or df.empty:
                 return None
             last = df.tail(1)
@@ -228,12 +233,12 @@ class LiveDataStream:
             prev_close = float(prev['Close'].iloc[0]) if not prev.empty else price
             ts = last.index[-1].to_pydatetime()
             vol = float(last['Volume'].iloc[0]) if 'Volume' in last.columns else 0.0
-            return {
+				return {
                 'price': price,
                 'prev_close': prev_close,
                 'timestamp': ts,
                 'volume': vol,
-                'source': f"YF-{yf_symbol}"
+					'source': f"YF-{self.yf_symbol}"
             }
         except Exception:
             return None
