@@ -176,12 +176,14 @@ class LiveDataStream:
         self.enable_high = True
         # Event engine
         self.event_engine = EventEngine(self.symbol) if EventEngine else None
-        # Ensure MT5 uses this stream's symbol
+        # Ensure MT5 uses this stream's symbol and reinitialize if needed
         try:
             if self.mt5:
                 self.mt5.symbol = self.symbol
                 import MetaTrader5 as mt5
                 mt5.symbol_select(self.symbol, True)
+                # Re-initialize after symbol override so connector keeps it
+                self.mt5.initialize()
         except Exception:
             pass
         # Global engine mode
