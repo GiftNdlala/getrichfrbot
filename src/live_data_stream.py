@@ -120,7 +120,10 @@ class LiveDataStream:
 		# Resolve data mapping once for transparency/debug
 		try:
 			self.yf_symbol = self._map_symbol_to_yfinance()
-			print(f"✅ Stream init for {self.symbol} | yfinance={self.yf_symbol} | gold={self._is_gold_symbol()}")
+			feeds = self.config.get('data_feed', {})
+			primary = feeds.get('primary', 'MT5')
+			backups = feeds.get('backups', [])
+			print(f"✅ Stream init for {self.symbol} | primary={primary} | backups={backups} | yfinance={self.yf_symbol} | gold={self._is_gold_symbol()}")
 		except Exception:
 			self.yf_symbol = self.symbol
 
@@ -270,12 +273,17 @@ class LiveDataStream:
                 data = None
 
             # Fallbacks
-            if (data is None or data.empty):
-                if self.data_source is not None:
-                    data = self.data_source.get_historical_data(days=365)
-                else:
-                    # Generic fallback via Yahoo Finance for non-gold (or any) symbols
-                    data = self._yf_get_historical()
+			if (data is None or data.empty):
+				if self.data_source is not None:
+					data = self.data_source.get_historical_data(days=365)
+				else:
+					# Generic fallback via Yahoo Finance only if allowed in backups
+					feeds = self.config.get('data_feed', {})
+					backups = feeds.get('backups', [])
+					if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
+						data = self._yf_get_historical()
+					else:
+						data = pd.DataFrame()
             
             if data.empty:
                 print("⚠️ No data received, using mock data")
@@ -337,8 +345,8 @@ class LiveDataStream:
             except Exception as e:
                 print(f"⚠️ MT5 quote error: {e}")
         
-        # Fallbacks based on symbol type
-        if self._is_gold_symbol():
+		# Fallbacks based on symbol type
+		if self._is_gold_symbol():
             # Fallback 1: Simple Real Gold API
             if self.simple_gold_api:
                 try:
@@ -394,12 +402,15 @@ class LiveDataStream:
                         }
                 except Exception as e:
                     print(f"⚠️ Robust data source error: {e}")
-        else:
-            # Non-gold symbols: use Yahoo Finance as generic fallback
-            yf_quote = self._yf_get_current_quote()
-            if yf_quote and yf_quote.get('price', 0) > 0:
-                print(f"✅ YF DATA {yf_quote['source']}: ${yf_quote['price']:.2f}")
-                return yf_quote
+		else:
+			# Non-gold symbols: use Yahoo Finance only if configured as a backup
+			feeds = self.config.get('data_feed', {})
+			backups = feeds.get('backups', [])
+			if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
+				yf_quote = self._yf_get_current_quote()
+				if yf_quote and yf_quote.get('price', 0) > 0:
+					print(f"✅ YF DATA {yf_quote['source']}: ${yf_quote['price']:.2f}")
+					return yf_quote
         
         # Method 4: ONLY use realistic mock as absolute last resort
         print("🚨 WARNING: All REAL sources failed - using realistic mock")
