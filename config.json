@@ -4,7 +4,7 @@
     "platform": "MT5",
     "server": "Exness-MT5Trial9",
     "login": 211338841,
-    "symbol": "XAUUSDm"
+    "symbol": "XAUUSDm"  
   },
   "risk": {
     "risk_percent_per_trade": 0.25,
@@ -14,14 +14,14 @@
     "move_sl_to_be_after_tp1": true,
     "symbol_caps": {
       "XAUUSDm": { "daily_loss_limit_pct": 3.0, "max_open_risk_pct": 5.0 },
-      "US30": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 6.0 }
+      "US30m": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 6.0 }
     }
   },
 
   "sessions": {
     "timezone": "Africa/Johannesburg",
-    "trade_start": "10:00",
-    "trade_end": "23:59",
+    "trade_start": "08:00",
+    "trade_end": "03:00",
     "days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
   },
   "blackout": {
@@ -30,10 +30,10 @@
     "source": "manual"
   },
   "filters": {
-    "max_spread_points": 30,
+    "max_spread_points": 200,
     "min_tick_volume_ratio": 0.5,
     "consolidation_max_range_atr": 0.4,
-    "min_atr_pips": 3
+    "min_atr_pips": 0
   },
   "data_feed": {
     "primary": "MT5",
@@ -41,7 +41,7 @@
   },
   "execution": {
     "enabled": true,
-    "demo_only": true,
+    "demo_only": false,
     "slippage_points": 100,
     "deviation_points": 180,
     "campaign_window_minutes": 10,
@@ -57,17 +57,17 @@
       "HIGH": 20
     },
     "high_tier_tp_pips": {
-      "tier1_count": 2,
-      "tier1_pips": 6,
-      "tier2_count": 3,
-      "tier2_pips": 9
+      "tier1_count": 1,
+      "tier1_pips": 4,
+      "tier2_count": 0,
+      "tier2_pips": 0
     },
-    "low_tp_pips": 5,
-    "medium_tp_primary_pips": 9,
+    "low_tp_pips": 4,
+    "medium_tp_primary_pips": 7,
     "farmer": {
       "enabled": true,
       "tp_pips": 2,
-      "sl_pips": 6,
+      "sl_pips": 18,
       "trades_per_cycle": 3,
       "cycle_seconds": 30,
       "dynamic_tp": true
@@ -75,7 +75,7 @@
     "loss_minimizer": {
       "enabled": true,
       "soft_loss_dollars": 3.0,
-      "max_loss_dollars": 12.0,
+      "max_loss_dollars": 11.0,
       "retrace_points": 10,
       "improvement_window_seconds": 20
     }
