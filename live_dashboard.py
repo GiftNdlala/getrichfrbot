@@ -108,18 +108,18 @@ def init_live_stream():
 
     # Start US30m secondary stream
     try:
-		us_symbol = os.getenv('US30_SYMBOL', 'US30m')
+        us_symbol = os.getenv('US30_SYMBOL', 'US30m')
         us_stream = LiveDataStream(symbol=us_symbol, update_interval=30)
         us_stream.add_signal_callback(signal_callback)
         us_stream.start_streaming()
         streams[us_symbol] = us_stream
-		print(f"✅ Live stream initialized for {us_symbol}")
-		# Sanity log to ensure data source path awareness
-		try:
-			mapped = getattr(us_stream, 'yf_symbol', us_symbol)
-			print(f"🔎 {us_symbol} mapped to data source: {mapped}")
-		except Exception:
-			pass
+        print(f"✅ Live stream initialized for {us_symbol}")
+        # Sanity log to ensure data source path awareness
+        try:
+            mapped = getattr(us_stream, 'yf_symbol', us_symbol)
+            print(f"🔎 {us_symbol} mapped to data source: {mapped}")
+        except Exception:
+            pass
     except Exception as e:
         print(f"⚠️ Could not start US30 stream: {e}")
     print("✅ Live streams initialized and started")
