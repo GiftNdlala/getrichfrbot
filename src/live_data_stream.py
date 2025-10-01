@@ -464,17 +464,26 @@ class LiveDataStream:
             import pytz
             tz = pytz.timezone(tz_name)
             now = datetime.now(tz)
+            days = cfg.get('sessions', {}).get('days', ['Mon','Tue','Wed','Thu','Fri'])
             day = now.strftime('%a')
-            if day not in cfg.get('sessions', {}).get('days', ['Mon','Tue','Wed','Thu','Fri']):
-                return True
             start = cfg.get('sessions', {}).get('trade_start', '10:00')
             end = cfg.get('sessions', {}).get('trade_end', '19:00')
             start_h, start_m = map(int, start.split(':'))
             end_h, end_m = map(int, end.split(':'))
             start_dt = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
             end_dt = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
-            if not (start_dt <= now <= end_dt):
-                return True
+            # Same-day window (e.g., 08:00 -> 19:00)
+            if end_dt >= start_dt:
+                if day not in days:
+                    return True
+                return not (start_dt <= now <= end_dt)
+            # Overnight window crossing midnight (e.g., 20:00 -> 03:00)
+            prev_day = (now - timedelta(days=1)).strftime('%a')
+            on_session = (
+                (now >= start_dt and day in days) or  # after start today and today allowed
+                (now <= end_dt and prev_day in days)   # before end today and previous day allowed
+            )
+            return not on_session
         except Exception:
             return False
         return False
