@@ -66,6 +66,31 @@ class AutoTrader:
 		if lots <= 0:
 			return None
 		order_type = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
+		# Margin-aware lot downscaling for small accounts
+		try:
+			acc = self._account_info()
+			free_margin = float(getattr(acc, 'margin_free', 0.0) or 0.0)
+			min_lot = float(info.volume_min)
+			lot_step = float(info.volume_step)
+			# Reduce lots until margin fits or we hit min_lot
+			while lots >= min_lot:
+				margin_needed = mt5.order_calc_margin(order_type, self.symbol, lots, entry)
+				if margin_needed is None:
+					break
+				# Keep a small safety buffer (95% of free margin)
+				if float(margin_needed) <= free_margin * 0.95:
+					break
+				# Step down the lot size
+				decremented = max(min_lot, lots - lot_step)
+				# Align to lot_step grid
+				steps = max(0, int(round((decremented - min_lot) / (lot_step or 0.01))))
+				lots = round(min_lot + steps * lot_step, 2)
+			# If still not affordable, abort
+			if lots < min_lot:
+				return None
+		except Exception:
+			# If margin check fails, proceed with calculated lots (original behavior)
+			pass
 		request = {
 			"action": mt5.TRADE_ACTION_DEAL,
 			"symbol": self.symbol,
