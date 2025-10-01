@@ -25,6 +25,50 @@ class AutoTrader:
 	def _account_info(self):
 		return mt5.account_info()
 
+	def _max_affordable_lot(self, order_type: int, entry: float, info) -> float:
+		"""Compute the largest lot size affordable by current free margin, honoring lot grid.
+
+		Returns 0.0 if even the broker-minimum lot is unaffordable.
+		"""
+		try:
+			acc = self._account_info()
+			if not acc:
+				return 0.0
+			free_margin = float(getattr(acc, 'margin_free', 0.0) or 0.0)
+			min_lot = float(info.volume_min)
+			max_lot = float(info.volume_max)
+			lot_step = float(info.volume_step or 0.01)
+			if free_margin <= 0:
+				return 0.0
+			# If minimum lot fits, binary-search up to the maximum affordable
+			def fits(lots: float) -> bool:
+				m = mt5.order_calc_margin(order_type, self.symbol, lots, entry)
+				if m is None:
+					return False
+				return float(m) <= free_margin * 0.95
+			# Early reject: min lot unaffordable
+			if not fits(min_lot):
+				return 0.0
+			lo = min_lot
+			hi = max(min(max_lot, min_lot * 100), min_lot)  # cap search space
+			best = min_lot
+			# Binary search 20 iters max
+			for _ in range(20):
+				mid = (lo + hi) / 2.0
+				# Align to lot_step grid
+				steps = max(0, int(round((mid - min_lot) / (lot_step or 0.01))))
+				mid_aligned = round(min_lot + steps * lot_step, 2)
+				if mid_aligned < min_lot:
+					mid_aligned = min_lot
+				if fits(mid_aligned):
+					best = mid_aligned
+					lo = mid_aligned + lot_step
+				else:
+					hi = max(min_lot, mid_aligned - lot_step)
+			return round(best, 2)
+		except Exception:
+			return 0.0
+
 	def _calc_lot(self, entry: float, stop: float) -> float:
 		# Simple risk model: risk % of equity divided by monetary risk per lot
 		risk_pct = float(self.cfg.get('risk', {}).get('risk_percent_per_trade', 0.75)) / 100.0
@@ -66,31 +110,21 @@ class AutoTrader:
 		if lots <= 0:
 			return None
 		order_type = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
-		# Margin-aware lot downscaling for small accounts
-		try:
-			acc = self._account_info()
-			free_margin = float(getattr(acc, 'margin_free', 0.0) or 0.0)
-			min_lot = float(info.volume_min)
-			lot_step = float(info.volume_step)
-			# Reduce lots until margin fits or we hit min_lot
-			while lots >= min_lot:
-				margin_needed = mt5.order_calc_margin(order_type, self.symbol, lots, entry)
-				if margin_needed is None:
-					break
-				# Keep a small safety buffer (95% of free margin)
-				if float(margin_needed) <= free_margin * 0.95:
-					break
-				# Step down the lot size
-				decremented = max(min_lot, lots - lot_step)
-				# Align to lot_step grid
-				steps = max(0, int(round((decremented - min_lot) / (lot_step or 0.01))))
-				lots = round(min_lot + steps * lot_step, 2)
-			# If still not affordable, abort
-			if lots < min_lot:
-				return None
-		except Exception:
-			# If margin check fails, proceed with calculated lots (original behavior)
-			pass
+		# Margin-aware lot fit: cap by maximum affordable
+		affordable = self._max_affordable_lot(order_type, entry, info)
+		min_lot = float(info.volume_min)
+		lot_step = float(info.volume_step or 0.01)
+		if affordable <= 0.0:
+			# Even min lot unaffordable -> skip
+			return None
+		# Take the minimum of risk-lot and affordable lot
+		if lots > affordable:
+			lots = affordable
+		# Align to lot grid
+		steps = max(0, int(round((lots - min_lot) / (lot_step or 0.01))))
+		lots = round(min_lot + steps * lot_step, 2)
+		if lots < min_lot:
+			return None
 		request = {
 			"action": mt5.TRADE_ACTION_DEAL,
 			"symbol": self.symbol,
