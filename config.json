@@ -3,7 +3,7 @@
     "name": "Exness",
     "platform": "MT5",
     "server": "Exness-MT5Trial9",
-    "login": 211338841,
+    "login": 211787110,
     "symbol": "XAUUSDm"  
   },
   "risk": {
@@ -13,8 +13,8 @@
     "tp_atr_multipliers": [0.3, 0.6, 1.0],
     "move_sl_to_be_after_tp1": true,
     "symbol_caps": {
-      "XAUUSDm": { "daily_loss_limit_pct": 3.0, "max_open_risk_pct": 5.0 },
-      "US30m": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 6.0 }
+      "XAUUSDm": { "daily_loss_limit_pct": 90.0, "max_open_risk_pct": 5.0 },
+      "US30m": { "daily_loss_limit_pct": 90.0, "max_open_risk_pct": 6.0 }
     }
   },
 
