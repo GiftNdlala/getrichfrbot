@@ -299,15 +299,25 @@ def event_toggle():
 @app.route('/api/engine_mode', methods=['POST'])
 def engine_mode():
     global streams
-    mode = request.json.get('mode', 'ALL')
+    payload = request.get_json(silent=True) or {}
+    mode = payload.get('mode', 'ALL')
     sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
     s = streams.get(sym)
     if s:
         try:
             s.set_engine_mode(mode)
-            return jsonify({'status': 'success', 'symbol': sym, 'engine_mode': mode})
+            return jsonify({
+                'status': 'success',
+                'symbol': sym,
+                'engine_mode': s.engine_mode,
+                'engine_low_enabled': s.enable_low,
+                'engine_medium_enabled': s.enable_medium,
+                'engine_high_enabled': s.enable_high,
+                'farmer_enabled': s.farmer_enabled,
+                'event_mode_enabled': s.event_mode_enabled
+            })
         except Exception as e:
-            return jsonify({'status': 'error', 'message': str(e)})
+            return jsonify({'status': 'error', 'message': str(e)}), 400
     return jsonify({'status': 'no_stream'})
 
 def ensure_professional_template():
