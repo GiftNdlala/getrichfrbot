@@ -169,6 +169,7 @@ class LiveDataStream:
         self._farmer_last_cycle = None
         farmer_cfg = self.config.get('execution', {}).get('farmer', {})
         self.farmer_enabled = bool(farmer_cfg.get('enabled', False))
+        self._farmer_default_enabled = self.farmer_enabled
         self.farmer_cycle_seconds = int(farmer_cfg.get('cycle_seconds', 120))
         # Engine toggles
         self.enable_low = True
@@ -949,89 +950,119 @@ class LiveDataStream:
                                 continue
                             level = (live_signal.alert_level or 'LOW').upper()
                             side = 1 if live_signal.signal == 1 else -1
-                            # Per-engine gating
-                            if level == 'LOW' and not self.enable_low:
-                                print("⏸️ Engine gated: LOW disabled")
-                            elif level == 'MEDIUM' and not self.enable_medium:
-                                print("⏸️ Engine gated: MEDIUM disabled")
-                            elif level == 'HIGH' and not self.enable_high:
-                                print("⏸️ Engine gated: HIGH disabled")
+                            engine_mode = getattr(self, 'engine_mode', 'ALL')
+                            general_allowed = True
+                            farmer_allowed = self.farmer_enabled
+
+                            if engine_mode == 'NONE':
+                                general_allowed = False
+                                farmer_allowed = False
+                            elif engine_mode == 'FARMER_ONLY':
+                                general_allowed = False
+                            elif engine_mode == 'LOW_ONLY':
+                                general_allowed = (level == 'LOW')
+                                farmer_allowed = False
+                            elif engine_mode == 'MEDIUM_ONLY':
+                                general_allowed = (level == 'MEDIUM')
+                                farmer_allowed = False
+                            elif engine_mode == 'HIGH_ONLY':
+                                general_allowed = (level == 'HIGH')
+                                farmer_allowed = False
+                            elif engine_mode == 'EVENT_ONLY':
+                                general_allowed = False
+                                farmer_allowed = False
+
+                            if general_allowed:
+                                # Per-engine gating
+                                if level == 'LOW' and not self.enable_low:
+                                    print("⏸️ Engine gated: LOW disabled")
+                                elif level == 'MEDIUM' and not self.enable_medium:
+                                    print("⏸️ Engine gated: MEDIUM disabled")
+                                elif level == 'HIGH' and not self.enable_high:
+                                    print("⏸️ Engine gated: HIGH disabled")
+                                else:
+                                    # campaign check
+                                    if self.campaign and not self.campaign.allow(self.symbol, side, level):
+                                        print(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
+                                    else:
+                                        # Determine TP by level/tiering
+                                        tp = live_signal.take_profit_1
+                                        cfg_exec = self.config.get('execution', {})
+                                        if level == 'LOW':
+                                            tp_pips = int(cfg_exec.get('low_tp_pips', 5))
+                                            tp_low_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                            tp = tp_low_abs
+                                        elif level == 'MEDIUM':
+                                            tp_pips = int(cfg_exec.get('medium_tp_primary_pips', 9))
+                                            tp_med_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                                            tp = tp_med_abs
+                                        # HIGH: allow tiered spawning counts
+                                        tiers = []
+                                        if level == 'HIGH':
+                                            tier_cfg = cfg_exec.get('high_tier_tp_pips', { 'tier1_count':2,'tier1_pips':6,'tier2_count':3,'tier2_pips':9 })
+                                            tiers = (
+                                                [('TIER1', tier_cfg.get('tier1_pips',6))]*int(tier_cfg.get('tier1_count',2)) +
+                                                [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
+                                            )
+                                        # Spawn orders
+                                        def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None, engine: str = "INTRADAY"):
+                                            nonlocal live_signal
+                                            sl = live_signal.stop_loss
+                                            entry = live_signal.entry_price
+                                            local_tp = live_signal.take_profit_1
+                                            if tp_absolute is not None:
+                                                local_tp = tp_absolute
+                                            elif tp_pips_override is not None:
+                                                local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
+                                            trade = self.autotrader.place_market_order(side, entry, sl, local_tp)
+                                            if trade and self.persistence:
+                                                try:
+                                                    self.persistence.save_trade({
+                                                        'timestamp': live_signal.timestamp,
+                                                        'symbol': live_signal.symbol,
+                                                        'direction': side,
+                                                        'entry': entry,
+                                                        'sl': sl,
+                                                        'tp': local_tp,
+                                                        'lots': trade.get('volume', 0.0),
+                                                        'ticket': trade.get('ticket', 0),
+                                                        'status': 'SENT',
+                                                        'alert_level': level,
+                                                        'tier': tier_name or '',
+                                                        'engine': engine
+                                                    })
+                                                    print(f"✅ [{engine}] Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'}")
+                                                    if self.order_manager:
+                                                        self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
+                                                    if self.campaign:
+                                                        self.campaign.record(self.symbol, side, level)
+                                                except Exception as e:
+                                                    print(f"⚠️ Trade persist error: {e}")
+                                        if level == 'HIGH' and tiers:
+                                            # Send tiered partials first
+                                            for tier_name, pips in tiers:
+                                                if not self.campaign or self.campaign.allow(self.symbol, side, level):
+                                                    send_one(tier_name, pips, engine="SWING_HIGH")
+                                            # Remaining up to campaign limit use base TP
+                                            if not self.campaign or self.campaign.allow(self.symbol, side, level):
+                                                send_one(None, None, engine="SWING_HIGH")
+                                        else:
+                                            # LOW/MEDIUM use absolute TP we computed
+                                            engine_name = "INTRADAY_LOW" if level=="LOW" else ("INTRADAY_MED" if level=="MEDIUM" else "INTRADAY")
+                                            send_one(None, None, tp_absolute=tp, engine=engine_name)
                             else:
-                                # campaign check
-                                if self.campaign and not self.campaign.allow(self.symbol, side, level):
-                                    print(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
-                                else:
-                                    # Determine TP by level/tiering
-                                    tp = live_signal.take_profit_1
-                                    cfg_exec = self.config.get('execution', {})
-                                    if level == 'LOW':
-                                        tp_pips = int(cfg_exec.get('low_tp_pips', 5))
-                                        tp_low_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
-                                        tp = tp_low_abs
-                                    elif level == 'MEDIUM':
-                                        tp_pips = int(cfg_exec.get('medium_tp_primary_pips', 9))
-                                        tp_med_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
-                                        tp = tp_med_abs
-                                    # HIGH: allow tiered spawning counts
-                                    tiers = []
-                                    if level == 'HIGH':
-                                        tier_cfg = cfg_exec.get('high_tier_tp_pips', { 'tier1_count':2,'tier1_pips':6,'tier2_count':3,'tier2_pips':9 })
-                                        tiers = (
-                                            [('TIER1', tier_cfg.get('tier1_pips',6))]*int(tier_cfg.get('tier1_count',2)) +
-                                            [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
-                                        )
-                                    # Spawn orders
-                                    def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None, engine: str = "INTRADAY"):
-                                        nonlocal live_signal
-                                        sl = live_signal.stop_loss
-                                        entry = live_signal.entry_price
-                                        local_tp = live_signal.take_profit_1
-                                        if tp_absolute is not None:
-                                            local_tp = tp_absolute
-                                        elif tp_pips_override is not None:
-                                            local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
-                                        trade = self.autotrader.place_market_order(side, entry, sl, local_tp)
-                                        if trade and self.persistence:
-                                            try:
-                                                self.persistence.save_trade({
-                                                    'timestamp': live_signal.timestamp,
-                                                    'symbol': live_signal.symbol,
-                                                    'direction': side,
-                                                    'entry': entry,
-                                                    'sl': sl,
-                                                    'tp': local_tp,
-                                                    'lots': trade.get('volume', 0.0),
-                                                    'ticket': trade.get('ticket', 0),
-                                                    'status': 'SENT',
-                                                    'alert_level': level,
-                                                    'tier': tier_name or '',
-                                                    'engine': engine
-                                                })
-                                                print(f"✅ [{engine}] Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'}")
-                                                if self.order_manager:
-                                                    self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
-                                                if self.campaign:
-                                                    self.campaign.record(self.symbol, side, level)
-                                            except Exception as e:
-                                                print(f"⚠️ Trade persist error: {e}")
-                                if level == 'HIGH' and tiers:
-                                    # Send tiered partials first
-                                    for tier_name, pips in tiers:
-                                        if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                            send_one(tier_name, pips, engine="SWING_HIGH")
-                                    # Remaining up to campaign limit use base TP
-                                    if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                        send_one(None, None, engine="SWING_HIGH")
-                                else:
-                                    # LOW/MEDIUM use absolute TP we computed
-                                    engine_name = "INTRADAY_LOW" if level=="LOW" else ("INTRADAY_MED" if level=="MEDIUM" else "INTRADAY")
-                                    send_one(None, None, tp_absolute=tp, engine=engine_name)
+                                if engine_mode == 'NONE':
+                                    print("⏸️ Engine mode NONE blocking automated entries")
+                                elif engine_mode == 'FARMER_ONLY':
+                                    print("⏸️ Engine mode FARMER_ONLY skipping tiered engines")
+                                elif engine_mode.endswith('_ONLY'):
+                                    print(f"⏸️ Engine mode {engine_mode} skipping {level} signal")
 
                             # 2-pip farmer (runs alongside, subject to farmer cycle)
                             try:
                                 # Farmer runs independently every cycle when a non-HOLD signal exists,
                                 # but piggybacks the HIGH campaign gate.
-                                if self.farmer_enabled and live_signal.signal != 0:
+                                if farmer_allowed and live_signal.signal != 0:
                                     now = datetime.now()
                                     if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= self.farmer_cycle_seconds:
                                         self._farmer_last_cycle = now
@@ -1135,7 +1166,8 @@ class LiveDataStream:
             'engine_low_enabled': self.enable_low,
             'engine_medium_enabled': self.enable_medium,
             'engine_high_enabled': self.enable_high,
-            'event_mode_enabled': self.event_mode_enabled
+            'event_mode_enabled': self.event_mode_enabled,
+            'engine_mode': self.engine_mode
         }
 
     def set_farmer_enabled(self, enabled: bool):
@@ -1154,9 +1186,55 @@ class LiveDataStream:
         self.event_mode_enabled = bool(enabled)
 
     def set_engine_mode(self, mode: str):
-        allowed = {'ALL','FARMER_ONLY','LOW_ONLY','MEDIUM_ONLY','HIGH_ONLY','EVENT_ONLY','NONE'}
-        if mode in allowed:
-            self.engine_mode = mode
+        allowed = {'ALL', 'FARMER_ONLY', 'LOW_ONLY', 'MEDIUM_ONLY', 'HIGH_ONLY', 'EVENT_ONLY', 'NONE'}
+        mode = (mode or 'ALL').upper()
+        if mode not in allowed:
+            raise ValueError(f"Invalid engine mode: {mode}")
+
+        self.engine_mode = mode
+
+        if mode == 'ALL':
+            self.enable_low = True
+            self.enable_medium = True
+            self.enable_high = True
+            self.event_mode_enabled = False
+            self.farmer_enabled = self._farmer_default_enabled
+        elif mode == 'FARMER_ONLY':
+            self.enable_low = False
+            self.enable_medium = False
+            self.enable_high = False
+            self.event_mode_enabled = False
+            self.farmer_enabled = True
+        elif mode == 'LOW_ONLY':
+            self.enable_low = True
+            self.enable_medium = False
+            self.enable_high = False
+            self.event_mode_enabled = False
+            self.farmer_enabled = False
+        elif mode == 'MEDIUM_ONLY':
+            self.enable_low = False
+            self.enable_medium = True
+            self.enable_high = False
+            self.event_mode_enabled = False
+            self.farmer_enabled = False
+        elif mode == 'HIGH_ONLY':
+            self.enable_low = False
+            self.enable_medium = False
+            self.enable_high = True
+            self.event_mode_enabled = False
+            self.farmer_enabled = False
+        elif mode == 'EVENT_ONLY':
+            self.enable_low = False
+            self.enable_medium = False
+            self.enable_high = False
+            self.event_mode_enabled = True
+            self.farmer_enabled = False
+        elif mode == 'NONE':
+            self.enable_low = False
+            self.enable_medium = False
+            self.enable_high = False
+            self.event_mode_enabled = False
+            self.farmer_enabled = False
 
 # Example usage
 if __name__ == "__main__":
