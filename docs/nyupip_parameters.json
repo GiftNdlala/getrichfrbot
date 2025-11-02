@@ -1,0 +1,55 @@
+{
+  "strategy": {
+    "name": "NyuPIP (Feni4Real)",
+    "code": "NYUPIP_XAU",
+    "category": "standalone",
+    "mode": "auto"
+  },
+  "instruments": ["XAUUSD"],
+  "timeframes": {
+    "trend": "H1",
+    "execution": "M15"
+  },
+  "trend_filter": {
+    "indicator": "SMA",
+    "period": 50,
+    "timeframe": "H1"
+  },
+  "volatility_filter": {
+    "indicator": "ATR",
+    "period": 14,
+    "timeframe": "H1",
+    "threshold_formula": "current_ATR14 >= 1.1 * SMA(ATR14, 14)"
+  },
+  "momentum_filter": {
+    "indicator": "RSI",
+    "period": 14,
+    "timeframe": "M15",
+    "enabled": false,
+    "activation_rule": "if enabled: longs require RSI > 50, shorts require RSI < 50"
+  },
+  "cis_window": {
+    "session_time_zone": "SAST (UTC+2)",
+    "bias_candle": "14:45",
+    "entry_candle": "15:15",
+    "reference_session": "previous New York session high/low"
+  },
+  "risk": {
+    "default_per_trade": 0.01,
+    "max_per_trade": 0.02,
+    "max_concurrent_trades": 2,
+    "daily_loss_cap": 0.05,
+    "weekly_loss_cap": 0.10
+  },
+  "execution": {
+    "spread_limit_multiple": 2.0,
+    "spread_reference": "rolling 30-minute average",
+    "active_hours_sast": ["08:00", "18:00"],
+    "active_hours_utc": ["06:00", "16:00"]
+  },
+  "labels": {
+    "A": "H1 SMA interaction zone (entry zone)",
+    "B": "Trend-validation line drawn along swing structure",
+    "C": "H1 50-SMA trend filter"
+  }
+}
