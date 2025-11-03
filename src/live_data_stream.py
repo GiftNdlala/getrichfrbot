@@ -39,6 +39,8 @@ try:
 except ImportError:
     EventEngine = None
 
+from .strategies import NYUPIPStrategy, NYUPIPSignal
+
 # Import WORKING real gold API for actual market data
 try:
     from simple_real_gold import SimpleRealGold
@@ -195,6 +197,15 @@ class LiveDataStream:
         
         # Historical data for indicators (need minimum 200 periods)
         self.historical_data = self._fetch_initial_data()
+
+        # NYUPIP strategy integration
+        self.nyupip_strategy = NYUPIPStrategy(symbol=self.symbol)
+        self.nyupip_enabled = False
+        self.nyupip_state: Dict[str, Optional[Dict[str, object]]] = {
+            'enabled': False,
+            'last_signal': None,
+            'auto_last_ticket': None,
+        }
         
     def _is_gold_symbol(self) -> bool:
         try:
@@ -1116,6 +1127,14 @@ class LiveDataStream:
                                                     print(f"⚠️ Farmer persist error: {e}")
                             except Exception:
                                 pass
+
+                        if self.nyupip_enabled:
+                            try:
+                                nyupip_signals = self.nyupip_strategy.evaluate(self.historical_data.copy(), current_quote)
+                                for nyupip_signal in nyupip_signals:
+                                    self._process_nyupip_signal(nyupip_signal, spread_block, atr_block)
+                            except Exception as e:
+                                print(f"⚠️ NYUPIP processing error: {e}")
                         
                     else:
                         print("⚠️ Failed to fetch current quote")
@@ -1167,7 +1186,9 @@ class LiveDataStream:
             'engine_medium_enabled': self.enable_medium,
             'engine_high_enabled': self.enable_high,
             'event_mode_enabled': self.event_mode_enabled,
-            'engine_mode': self.engine_mode
+            'engine_mode': self.engine_mode,
+            'nyupip_enabled': self.nyupip_enabled,
+            'nyupip_last_signal': self.nyupip_state.get('last_signal'),
         }
 
     def set_farmer_enabled(self, enabled: bool):
@@ -1235,6 +1256,108 @@ class LiveDataStream:
             self.enable_high = False
             self.event_mode_enabled = False
             self.farmer_enabled = False
+
+    # ------------------------------------------------------------------
+    # NYUPIP strategy helpers
+    # ------------------------------------------------------------------
+    def set_nyupip_enabled(self, enabled: bool):
+        self.nyupip_enabled = bool(enabled)
+        self.nyupip_state['enabled'] = self.nyupip_enabled
+        status = 'enabled' if self.nyupip_enabled else 'disabled'
+        print(f"🟣 NYUPIP strategy {status} for {self.symbol}")
+
+    def get_nyupip_state(self) -> Dict[str, object]:
+        return {
+            'enabled': self.nyupip_enabled,
+            'last_signal': self.nyupip_state.get('last_signal'),
+            'auto_last_ticket': self.nyupip_state.get('auto_last_ticket'),
+        }
+
+    def _process_nyupip_signal(self, signal: NYUPIPSignal, spread_block: bool, atr_block: bool):
+        payload = signal.to_payload()
+        self.nyupip_state['last_signal'] = payload
+
+        direction = 'BUY' if signal.direction == 1 else 'SELL'
+        print(
+            f"🟣 [NYUPIP-{signal.module}] {direction} @ {signal.entry_price:.2f} | "
+            f"SL {signal.stop_loss:.2f} | TP {signal.take_profit_primary:.2f} | RR {signal.risk_reward:.2f}"
+        )
+
+        if self.persistence:
+            try:
+                record = payload.copy()
+                record.update({
+                    'engine': f'NYUPIP_{signal.module}',
+                    'strategy': 'NYUPIP',
+                    'timestamp': signal.timestamp.isoformat(),
+                    'direction': signal.direction,
+                })
+                self.persistence.save_signal(record)
+            except Exception as exc:
+                print(f"⚠️ NYUPIP persist error: {exc}")
+
+        can_trade = (
+            self.autotrader
+            and self.autotrader.enabled
+            and not spread_block
+            and not atr_block
+            and not self.event_mode_enabled
+            and not self._is_blackout_or_off_session()
+        )
+
+        if not can_trade:
+            return
+
+        try:
+            trade = self.autotrader.place_market_order(
+                signal.direction,
+                signal.entry_price,
+                signal.stop_loss,
+                signal.take_profit_primary,
+            )
+        except Exception as exc:
+            print(f"⚠️ NYUPIP auto-trade error: {exc}")
+            return
+
+        if not trade:
+            return
+
+        ticket = trade.get('ticket', 0)
+        self.nyupip_state['auto_last_ticket'] = ticket
+        print(f"✅ [NYUPIP-{signal.module}] Auto order sent ticket={ticket} lots={trade.get('volume', 0.0)}")
+
+        if self.persistence:
+            try:
+                self.persistence.save_trade({
+                    'timestamp': signal.timestamp.isoformat(),
+                    'symbol': self.symbol,
+                    'direction': signal.direction,
+                    'entry': signal.entry_price,
+                    'sl': signal.stop_loss,
+                    'tp': signal.take_profit_primary,
+                    'lots': trade.get('volume', 0.0),
+                    'ticket': ticket,
+                    'status': 'SENT',
+                    'alert_level': signal.module,
+                    'tier': 'NYUPIP',
+                    'engine': f'NYUPIP_{signal.module}'
+                })
+            except Exception as exc:
+                print(f"⚠️ NYUPIP trade persist error: {exc}")
+
+        if self.order_manager:
+            try:
+                self.order_manager.register_new_order(
+                    ticket,
+                    signal.direction,
+                    signal.entry_price,
+                    signal.stop_loss,
+                    signal.take_profit_primary,
+                    signal.module,
+                    tier='NYUPIP'
+                )
+            except Exception as exc:
+                print(f"⚠️ Order manager NYUPIP error: {exc}")
 
 # Example usage
 if __name__ == "__main__":

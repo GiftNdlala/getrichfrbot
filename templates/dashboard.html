@@ -561,6 +561,7 @@
                 <button id="btn-med-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#795548; color:#fff; font-weight:600; cursor:pointer;">MED: On</button>
                 <button id="btn-high-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#E91E63; color:#fff; font-weight:600; cursor:pointer;">HIGH: On</button>
                 <button id="btn-event-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#F44336; color:#fff; font-weight:600; cursor:pointer;">Event: Off</button>
+                <button id="btn-nyupip-toggle" data-enabled="false" style="padding:10px 16px; border-radius:8px; border:none; background:#9E9E9E; color:#fff; font-weight:600; cursor:pointer;">NYUPIP: Off</button>
                 <select id="engine-mode" style="padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); color:white;">
                     <option value="ALL">Mode: ALL</option>
                     <option value="FARMER_ONLY">Farmer Only</option>
@@ -574,6 +575,7 @@
             <div style="display:flex; gap:8px; align-items:center;">
                 <div id="farmer-badge" class="status-indicator status-active">🌾 Farmer in: --s</div>
                 <div id="throttle-status" class="status-indicator status-hold">Campaign: --</div>
+                <div id="nyupip-status" class="status-indicator status-hold">NYUPIP: Off</div>
             </div>
         </div>
         
@@ -836,6 +838,7 @@
                 const st = await res.json();
                 updateFarmerBadge(st);
                 updateEngineToggleButtons(st);
+                updateNyupipStatus(st);
                 const modeSel = document.getElementById('engine-mode');
                 if (modeSel && st.engine_mode) {
                     modeSel.value = st.engine_mode;
@@ -1111,6 +1114,30 @@
                 if (highBtn) highBtn.textContent = `HIGH: ${high ? 'On' : 'Off'}`;
             } catch (e) {}
         }
+
+        function updateNyupipStatus(status) {
+            try {
+                const btn = document.getElementById('btn-nyupip-toggle');
+                const badge = document.getElementById('nyupip-status');
+                if (!btn || !badge) return;
+                const enabled = !!status.nyupip_enabled;
+                btn.textContent = `NYUPIP: ${enabled ? 'On' : 'Off'}`;
+                btn.style.background = enabled ? '#4CAF50' : '#9E9E9E';
+                btn.dataset.enabled = enabled ? 'true' : 'false';
+
+                const last = status.nyupip_last_signal || {};
+                const badgeClass = enabled ? 'status-active' : 'status-hold';
+                if (last && last.module) {
+                    const side = last.direction === 1 ? 'BUY' : (last.direction === -1 ? 'SELL' : '');
+                    const price = typeof last.entry_price === 'number' ? `$${Number(last.entry_price).toFixed(2)}` : '--';
+                    badge.textContent = `NYUPIP ${last.module}: ${side} ${price}`;
+                    badge.className = `status-indicator ${badgeClass}`;
+                } else {
+                    badge.textContent = `NYUPIP: ${enabled ? 'On' : 'Off'}`;
+                    badge.className = `status-indicator ${badgeClass}`;
+                }
+            } catch (e) {}
+        }
         
         function showLoading() {
             document.getElementById('loading').style.display = 'block';
@@ -1197,6 +1224,12 @@
             if (e.target && e.target.id === 'btn-event-toggle') {
                 const enabled = e.target.textContent.endsWith('Off');
                 try { await fetch('/api/event_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
+                fetchStatusOnly();
+            }
+            if (e.target && e.target.id === 'btn-nyupip-toggle') {
+                const btn = e.target;
+                const enabled = btn.dataset.enabled !== 'true';
+                try { await fetch('/api/nyupip/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
                 fetchStatusOnly();
             }
         });

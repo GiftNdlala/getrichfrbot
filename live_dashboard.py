@@ -320,6 +320,32 @@ def engine_mode():
             return jsonify({'status': 'error', 'message': str(e)}), 400
     return jsonify({'status': 'no_stream'})
 
+@app.route('/api/nyupip/toggle', methods=['POST'])
+def nyupip_toggle():
+    global streams
+    payload = request.get_json(silent=True) or {}
+    enabled = bool(payload.get('enabled', False))
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if not s:
+        return jsonify({'status': 'no_stream'}), 404
+    try:
+        s.set_nyupip_enabled(enabled)
+        state = s.get_nyupip_state()
+        return jsonify({'status': 'success', 'symbol': sym, 'enabled': state['enabled'], 'state': state})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+@app.route('/api/nyupip/status')
+def nyupip_status():
+    global streams
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if not s:
+        return jsonify({'status': 'no_stream'}), 404
+    state = s.get_nyupip_state()
+    return jsonify({'status': 'success', 'symbol': sym, 'state': state})
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
