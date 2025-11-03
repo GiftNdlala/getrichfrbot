@@ -37,7 +37,17 @@
   },
   "data_feed": {
     "primary": "MT5",
-    "backups": []
+    "backups": [],
+    "startup_history": {
+      "mt5_m1_bars": 7200,
+      "min_rows": 4800,
+      "hydrate_csv": null,
+      "auto_cache": false
+    },
+    "history_limits": {
+      "indicator_m1": 400,
+      "nyupip_m1": 7200
+    }
   },
   "execution": {
     "enabled": true,
