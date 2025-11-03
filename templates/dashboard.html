@@ -1126,14 +1126,31 @@
                 btn.dataset.enabled = enabled ? 'true' : 'false';
 
                 const last = status.nyupip_last_signal || {};
-                const badgeClass = enabled ? 'status-active' : 'status-hold';
+                const diagnostics = status.nyupip_last_diagnostics || {};
+                const diagStatus = (diagnostics.status || '').toLowerCase();
+                const summaryReason = diagnostics.reason || (diagnostics.summary && diagnostics.summary.reason);
+                const formatReason = (reason) => {
+                    if (!reason) return '';
+                    return reason
+                        .replace(/_/g, ' ')
+                        .replace(/\b\w/g, (c) => c.toUpperCase());
+                };
+
+                let badgeClass = 'status-hold';
+                if (enabled && diagStatus === 'signal') {
+                    badgeClass = 'status-active';
+                }
+
                 if (last && last.module) {
                     const side = last.direction === 1 ? 'BUY' : (last.direction === -1 ? 'SELL' : '');
                     const price = typeof last.entry_price === 'number' ? `$${Number(last.entry_price).toFixed(2)}` : '--';
-                    badge.textContent = `NYUPIP ${last.module}: ${side} ${price}`;
+                    const rr = typeof last.risk_reward === 'number' ? ` · RR ${Number(last.risk_reward).toFixed(2)}` : '';
+                    badge.textContent = `NYUPIP ${last.module}: ${side} ${price}${rr}`;
                     badge.className = `status-indicator ${badgeClass}`;
                 } else {
-                    badge.textContent = `NYUPIP: ${enabled ? 'On' : 'Off'}`;
+                    const reasonText = enabled ? formatReason(summaryReason) : '';
+                    const suffix = reasonText ? ` (${reasonText})` : '';
+                    badge.textContent = `NYUPIP: ${enabled ? 'On' : 'Off'}${suffix}`;
                     badge.className = `status-indicator ${badgeClass}`;
                 }
             } catch (e) {}

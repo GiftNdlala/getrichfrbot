@@ -197,14 +197,22 @@ class LiveDataStream:
         
         # Historical data for indicators (need minimum 200 periods)
         self.historical_data = self._fetch_initial_data()
+        self._history_limit_default = 400
+        self._nyupip_history_limit = 7200  # roughly 5 days of 1-minute bars
+        base_cols = [col for col in ["Open", "High", "Low", "Close", "Volume"] if col in self.historical_data.columns]
+        if base_cols:
+            self.nyupip_history = self.historical_data[base_cols].copy()
+        else:
+            self.nyupip_history = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
         # NYUPIP strategy integration
         self.nyupip_strategy = NYUPIPStrategy(symbol=self.symbol)
         self.nyupip_enabled = False
-        self.nyupip_state: Dict[str, Optional[Dict[str, object]]] = {
+        self.nyupip_state: Dict[str, object] = {
             'enabled': False,
             'last_signal': None,
             'auto_last_ticket': None,
+            'last_diagnostics': self.nyupip_strategy.get_last_diagnostics(),
         }
         
     def _is_gold_symbol(self) -> bool:
@@ -476,13 +484,39 @@ class LiveDataStream:
         
         # Add to historical data
         self.historical_data = pd.concat([self.historical_data, new_row])
-        
-        # Keep only last 400 rows for efficiency
-        if len(self.historical_data) > 400:
-            self.historical_data = self.historical_data.tail(400)
-        
+
+        # Keep only recent window for fast indicator recalculation
+        if len(self.historical_data) > self._history_limit_default:
+            self.historical_data = self.historical_data.tail(self._history_limit_default)
+
         # Recalculate indicators
         self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
+
+        # Maintain a deeper buffer for NYUPIP strategy analysis
+        nyupip_row = new_row.reindex(columns=["Open", "High", "Low", "Close", "Volume"])
+        self._update_nyupip_history(nyupip_row)
+
+    def _update_nyupip_history(self, row: pd.DataFrame):
+        """Keep a long-running buffer of raw OHLC data for NYUPIP analysis."""
+        if row is None or row.empty:
+            return
+
+        base_cols = ["Open", "High", "Low", "Close", "Volume"]
+
+        if not hasattr(self, 'nyupip_history') or self.nyupip_history is None:
+            self.nyupip_history = pd.DataFrame(columns=base_cols)
+
+        row = row.reindex(columns=base_cols)
+        self.nyupip_history = pd.concat([self.nyupip_history, row])
+
+        if len(self.nyupip_history) > self._nyupip_history_limit:
+            self.nyupip_history = self.nyupip_history.tail(self._nyupip_history_limit)
+
+    def _get_nyupip_history(self) -> pd.DataFrame:
+        """Return the long-form history buffer used by the NYUPIP strategy."""
+        if not hasattr(self, 'nyupip_history') or self.nyupip_history is None:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        return self.nyupip_history
 
     def _is_blackout_or_off_session(self) -> bool:
         # Allow override to trade anytime
@@ -1130,7 +1164,9 @@ class LiveDataStream:
 
                         if self.nyupip_enabled:
                             try:
-                                nyupip_signals = self.nyupip_strategy.evaluate(self.historical_data.copy(), current_quote)
+                                nyupip_history = self._get_nyupip_history()
+                                nyupip_signals = self.nyupip_strategy.evaluate(nyupip_history.copy(), current_quote)
+                                self.nyupip_state['last_diagnostics'] = self.nyupip_strategy.get_last_diagnostics()
                                 for nyupip_signal in nyupip_signals:
                                     self._process_nyupip_signal(nyupip_signal, spread_block, atr_block)
                             except Exception as e:
@@ -1189,6 +1225,7 @@ class LiveDataStream:
             'engine_mode': self.engine_mode,
             'nyupip_enabled': self.nyupip_enabled,
             'nyupip_last_signal': self.nyupip_state.get('last_signal'),
+            'nyupip_last_diagnostics': self.nyupip_state.get('last_diagnostics'),
         }
 
     def set_farmer_enabled(self, enabled: bool):
@@ -1263,6 +1300,10 @@ class LiveDataStream:
     def set_nyupip_enabled(self, enabled: bool):
         self.nyupip_enabled = bool(enabled)
         self.nyupip_state['enabled'] = self.nyupip_enabled
+        if self.nyupip_enabled:
+            self.nyupip_state['last_diagnostics'] = self.nyupip_strategy.get_last_diagnostics()
+        else:
+            self.nyupip_state['last_diagnostics'] = None
         status = 'enabled' if self.nyupip_enabled else 'disabled'
         print(f"🟣 NYUPIP strategy {status} for {self.symbol}")
 
@@ -1271,11 +1312,13 @@ class LiveDataStream:
             'enabled': self.nyupip_enabled,
             'last_signal': self.nyupip_state.get('last_signal'),
             'auto_last_ticket': self.nyupip_state.get('auto_last_ticket'),
+            'last_diagnostics': self.nyupip_state.get('last_diagnostics'),
         }
 
     def _process_nyupip_signal(self, signal: NYUPIPSignal, spread_block: bool, atr_block: bool):
         payload = signal.to_payload()
         self.nyupip_state['last_signal'] = payload
+        self.nyupip_state['last_diagnostics'] = self.nyupip_strategy.get_last_diagnostics()
 
         direction = 'BUY' if signal.direction == 1 else 'SELL'
         print(
