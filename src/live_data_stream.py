@@ -41,7 +41,14 @@ try:
 except ImportError:
     EventEngine = None
 
-from .strategies import NYUPIPStrategy, NYUPIPSignal
+from .strategies import (
+    NYUPIPStrategy,
+    NYUPIPSignal,
+    ICTSwingPointsStrategy,
+    ICTSwingSignal,
+    ICTATMStrategy,
+    ICTATMSignal,
+)
 
 # Import WORKING real gold API for actual market data
 try:
@@ -229,6 +236,8 @@ class LiveDataStream:
             self.nyupip_history = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
         # NYUPIP strategy integration
+        tz_name = self.config.get('sessions', {}).get('timezone', 'UTC')
+
         self.nyupip_strategy = NYUPIPStrategy(symbol=self.symbol)
         self.nyupip_enabled = False
         self.nyupip_state: Dict[str, object] = {
@@ -236,6 +245,32 @@ class LiveDataStream:
             'last_signal': None,
             'auto_last_ticket': None,
             'last_diagnostics': self.nyupip_strategy.get_last_diagnostics(),
+        }
+
+        self.ict_swing_strategy = (
+            ICTSwingPointsStrategy(symbol=self.symbol, timezone=tz_name)
+            if self._is_gold_symbol()
+            else None
+        )
+        self.ict_atm_strategy = (
+            ICTATMStrategy(symbol=self.symbol, timezone=tz_name)
+            if self._is_gold_symbol()
+            else None
+        )
+
+        self.ict_swing_enabled = False
+        self.ict_atm_enabled = False
+        self.ict_swing_state: Dict[str, object] = {
+            'enabled': False,
+            'last_signal': None,
+            'last_diagnostics': None,
+            'auto_last_ticket': None,
+        }
+        self.ict_atm_state: Dict[str, object] = {
+            'enabled': False,
+            'last_signal': None,
+            'last_diagnostics': None,
+            'auto_last_ticket': None,
         }
         
     def _is_gold_symbol(self) -> bool:
@@ -1354,6 +1389,37 @@ class LiveDataStream:
                                     self._process_nyupip_signal(nyupip_signal, spread_block, atr_block)
                             except Exception as e:
                                 print(f"⚠️ NYUPIP processing error: {e}")
+
+                        strategy_history = None
+                        try:
+                            history_source = self._get_nyupip_history()
+                            if history_source is not None and not history_source.empty:
+                                strategy_history = history_source.copy()
+                        except Exception:
+                            strategy_history = None
+                        if strategy_history is None or strategy_history.empty:
+                            strategy_history = self.historical_data["Open"].to_frame().join(
+                                self.historical_data[[c for c in ["High", "Low", "Close", "Volume"] if c in self.historical_data.columns]],
+                                how="outer"
+                            ).dropna()
+
+                        if self.ict_swing_enabled and self.ict_swing_strategy and self._is_gold_symbol():
+                            try:
+                                swing_signals, swing_diag = self.ict_swing_strategy.evaluate(strategy_history, current_quote)
+                                self.ict_swing_state['last_diagnostics'] = swing_diag
+                                for swing_signal in swing_signals:
+                                    self._process_ict_swing_signal(swing_signal, spread_block, atr_block)
+                            except Exception as e:
+                                print(f"⚠️ ICT Swing processing error: {e}")
+
+                        if self.ict_atm_enabled and self.ict_atm_strategy and self._is_gold_symbol():
+                            try:
+                                atm_signals, atm_diag = self.ict_atm_strategy.evaluate(strategy_history, current_quote)
+                                self.ict_atm_state['last_diagnostics'] = atm_diag
+                                for atm_signal in atm_signals:
+                                    self._process_ict_atm_signal(atm_signal, spread_block, atr_block)
+                            except Exception as e:
+                                print(f"⚠️ ICT ATM processing error: {e}")
                         
                     else:
                         print("⚠️ Failed to fetch current quote")
@@ -1410,6 +1476,10 @@ class LiveDataStream:
             'nyupip_last_signal': self.nyupip_state.get('last_signal'),
             'nyupip_last_diagnostics': self.nyupip_state.get('last_diagnostics'),
             'trading_enabled': self.trading_enabled,
+            'ict_swing_enabled': self.ict_swing_enabled,
+            'ict_swing_state': self.get_ict_swing_state(),
+            'ict_atm_enabled': self.ict_atm_enabled,
+            'ict_atm_state': self.get_ict_atm_state(),
         }
 
     def set_farmer_enabled(self, enabled: bool):
@@ -1502,6 +1572,48 @@ class LiveDataStream:
             'last_diagnostics': self.nyupip_state.get('last_diagnostics'),
         }
 
+    def set_ict_swing_enabled(self, enabled: bool):
+        if not self._is_gold_symbol() or not self.ict_swing_strategy:
+            self.ict_swing_enabled = False
+            self.ict_swing_state['enabled'] = False
+            print("🟠 ICT Swing strategy unavailable for non-gold symbol")
+            return
+        self.ict_swing_enabled = bool(enabled)
+        self.ict_swing_state['enabled'] = self.ict_swing_enabled
+        if self.ict_swing_enabled:
+            self.ict_swing_state['last_diagnostics'] = self.ict_swing_strategy.get_last_diagnostics()
+        status = 'enabled' if self.ict_swing_enabled else 'disabled'
+        print(f"🟠 ICT Swing strategy {status} for {self.symbol}")
+
+    def get_ict_swing_state(self) -> Dict[str, object]:
+        return {
+            'enabled': self.ict_swing_enabled,
+            'last_signal': self.ict_swing_state.get('last_signal'),
+            'auto_last_ticket': self.ict_swing_state.get('auto_last_ticket'),
+            'last_diagnostics': self.ict_swing_state.get('last_diagnostics'),
+        }
+
+    def set_ict_atm_enabled(self, enabled: bool):
+        if not self._is_gold_symbol() or not self.ict_atm_strategy:
+            self.ict_atm_enabled = False
+            self.ict_atm_state['enabled'] = False
+            print("🟣 ICT ATM strategy unavailable for non-gold symbol")
+            return
+        self.ict_atm_enabled = bool(enabled)
+        self.ict_atm_state['enabled'] = self.ict_atm_enabled
+        if self.ict_atm_enabled:
+            self.ict_atm_state['last_diagnostics'] = self.ict_atm_strategy.get_last_diagnostics()
+        status = 'enabled' if self.ict_atm_enabled else 'disabled'
+        print(f"🟣 ICT ATM strategy {status} for {self.symbol}")
+
+    def get_ict_atm_state(self) -> Dict[str, object]:
+        return {
+            'enabled': self.ict_atm_enabled,
+            'last_signal': self.ict_atm_state.get('last_signal'),
+            'auto_last_ticket': self.ict_atm_state.get('auto_last_ticket'),
+            'last_diagnostics': self.ict_atm_state.get('last_diagnostics'),
+        }
+
     def _process_nyupip_signal(self, signal: NYUPIPSignal, spread_block: bool, atr_block: bool):
         payload = signal.to_payload()
         self.nyupip_state['last_signal'] = payload
@@ -1589,6 +1701,264 @@ class LiveDataStream:
                 )
             except Exception as exc:
                 print(f"⚠️ Order manager NYUPIP error: {exc}")
+
+    def _process_ict_swing_signal(self, signal: ICTSwingSignal, spread_block: bool, atr_block: bool):
+        payload = signal.to_payload()
+        self.ict_swing_state['last_signal'] = payload
+        if self.ict_swing_strategy:
+            self.ict_swing_state['last_diagnostics'] = self.ict_swing_strategy.get_last_diagnostics()
+
+        direction_txt = 'BUY' if signal.direction == 1 else 'SELL'
+        print(
+            f"🟠 [ICT Swing {signal.session}] {direction_txt} @ {signal.entry_price:.2f} | "
+            f"SL {signal.stop_loss:.2f} | TP {signal.take_profit_primary:.2f} | RR {signal.risk_reward:.2f}"
+        )
+
+        if self.persistence:
+            try:
+                metadata = signal.metadata or {}
+                self.persistence.save_signal({
+                    'timestamp': payload['timestamp'],
+                    'symbol': signal.symbol,
+                    'current_price': signal.entry_price,
+                    'signal': signal.direction,
+                    'signal_type': direction_txt,
+                    'confidence': signal.confidence,
+                    'rsi': None,
+                    'macd': None,
+                    'macd_signal': None,
+                    'sma_20': None,
+                    'sma_50': None,
+                    'price_change': None,
+                    'price_change_pct': None,
+                    'alert_level': signal.session,
+                    'alert_color': None,
+                    'target_pips': None,
+                    'success_rate': None,
+                    'entry_price': signal.entry_price,
+                    'stop_loss': signal.stop_loss,
+                    'take_profit_1': signal.take_profit_primary,
+                    'take_profit_2': signal.take_profit_secondary,
+                    'take_profit_3': signal.take_profit_tertiary,
+                    'risk_reward_ratio': signal.risk_reward,
+                    'atr_value': metadata.get('atr_like'),
+                    'position_size_percent': None,
+                    'risk_amount_dollars': None,
+                    'potential_profit_tp1': None,
+                    'potential_profit_tp2': None,
+                    'potential_profit_tp3': None,
+                })
+            except Exception as exc:
+                print(f"⚠️ ICT Swing persist error: {exc}")
+
+        can_trade = (
+            self.autotrader
+            and self.autotrader.enabled
+            and self.trading_enabled
+            and not spread_block
+            and not atr_block
+            and not self.event_mode_enabled
+            and not self._is_blackout_or_off_session()
+        )
+
+        engine_mode = getattr(self, 'engine_mode', 'ALL')
+        if engine_mode in {'NONE', 'FARMER_ONLY', 'LOW_ONLY', 'MEDIUM_ONLY', 'EVENT_ONLY'}:
+            can_trade = False
+        if not self.enable_high:
+            can_trade = False
+
+        if not can_trade:
+            return
+
+        if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
+            print("⏸️ Halt new orders (daily cap) for ICT Swing")
+            return
+
+        if self.campaign and not self.campaign.allow(self.symbol, signal.direction, 'HIGH'):
+            print("⛔ Campaign limit reached for ICT Swing")
+            return
+
+        try:
+            trade = self.autotrader.place_market_order(
+                signal.direction,
+                signal.entry_price,
+                signal.stop_loss,
+                signal.take_profit_primary,
+            )
+        except Exception as exc:
+            print(f"⚠️ ICT Swing auto-trade error: {exc}")
+            return
+
+        if not trade:
+            return
+
+        ticket = trade.get('ticket', 0)
+        self.ict_swing_state['auto_last_ticket'] = ticket
+        print(f"✅ [ICT Swing {signal.session}] Auto order sent ticket={ticket} lots={trade.get('volume', 0.0)}")
+
+        if self.persistence:
+            try:
+                self.persistence.save_trade({
+                    'timestamp': payload['timestamp'],
+                    'symbol': self.symbol,
+                    'direction': signal.direction,
+                    'entry': signal.entry_price,
+                    'sl': signal.stop_loss,
+                    'tp': signal.take_profit_primary,
+                    'lots': trade.get('volume', 0.0),
+                    'ticket': ticket,
+                    'status': 'SENT',
+                    'alert_level': signal.session,
+                    'tier': signal.scenario,
+                    'engine': 'ICT_SWING'
+                })
+            except Exception as exc:
+                print(f"⚠️ ICT Swing trade persist error: {exc}")
+
+        if self.order_manager:
+            try:
+                self.order_manager.register_new_order(
+                    ticket,
+                    signal.direction,
+                    signal.entry_price,
+                    signal.stop_loss,
+                    signal.take_profit_primary,
+                    f"ICT_SWING_{signal.session}",
+                    tier=signal.scenario,
+                )
+            except Exception as exc:
+                print(f"⚠️ Order manager ICT Swing error: {exc}")
+        if self.campaign:
+            self.campaign.record(self.symbol, signal.direction, 'HIGH')
+
+    def _process_ict_atm_signal(self, signal: ICTATMSignal, spread_block: bool, atr_block: bool):
+        payload = signal.to_payload()
+        self.ict_atm_state['last_signal'] = payload
+        if self.ict_atm_strategy:
+            self.ict_atm_state['last_diagnostics'] = self.ict_atm_strategy.get_last_diagnostics()
+
+        direction_txt = 'BUY' if signal.direction == 1 else 'SELL'
+        print(
+            f"🟣 [ICT ATM] {direction_txt} @ {signal.entry_price:.2f} | "
+            f"SL {signal.stop_loss:.2f} | TP {signal.take_profit_primary:.2f} | RR {signal.risk_reward:.2f}"
+        )
+
+        if self.persistence:
+            try:
+                metadata = signal.metadata or {}
+                self.persistence.save_signal({
+                    'timestamp': payload['timestamp'],
+                    'symbol': signal.symbol,
+                    'current_price': signal.entry_price,
+                    'signal': signal.direction,
+                    'signal_type': direction_txt,
+                    'confidence': signal.confidence,
+                    'rsi': None,
+                    'macd': None,
+                    'macd_signal': None,
+                    'sma_20': None,
+                    'sma_50': None,
+                    'price_change': None,
+                    'price_change_pct': None,
+                    'alert_level': 'ICT_ATM',
+                    'alert_color': None,
+                    'target_pips': None,
+                    'success_rate': None,
+                    'entry_price': signal.entry_price,
+                    'stop_loss': signal.stop_loss,
+                    'take_profit_1': signal.take_profit_primary,
+                    'take_profit_2': signal.take_profit_secondary,
+                    'take_profit_3': signal.take_profit_tertiary,
+                    'risk_reward_ratio': signal.risk_reward,
+                    'atr_value': metadata.get('atr_current'),
+                    'position_size_percent': None,
+                    'risk_amount_dollars': None,
+                    'potential_profit_tp1': None,
+                    'potential_profit_tp2': None,
+                    'potential_profit_tp3': None,
+                })
+            except Exception as exc:
+                print(f"⚠️ ICT ATM persist error: {exc}")
+
+        can_trade = (
+            self.autotrader
+            and self.autotrader.enabled
+            and self.trading_enabled
+            and not spread_block
+            and not atr_block
+            and not self.event_mode_enabled
+            and not self._is_blackout_or_off_session()
+        )
+
+        engine_mode = getattr(self, 'engine_mode', 'ALL')
+        if engine_mode in {'NONE', 'FARMER_ONLY', 'LOW_ONLY', 'MEDIUM_ONLY', 'EVENT_ONLY'}:
+            can_trade = False
+        if not self.enable_high:
+            can_trade = False
+
+        if not can_trade:
+            return
+
+        if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
+            print("⏸️ Halt new orders (daily cap) for ICT ATM")
+            return
+
+        if self.campaign and not self.campaign.allow(self.symbol, signal.direction, 'HIGH'):
+            print("⛔ Campaign limit reached for ICT ATM")
+            return
+
+        try:
+            trade = self.autotrader.place_market_order(
+                signal.direction,
+                signal.entry_price,
+                signal.stop_loss,
+                signal.take_profit_primary,
+            )
+        except Exception as exc:
+            print(f"⚠️ ICT ATM auto-trade error: {exc}")
+            return
+
+        if not trade:
+            return
+
+        ticket = trade.get('ticket', 0)
+        self.ict_atm_state['auto_last_ticket'] = ticket
+        print(f"✅ [ICT ATM] Auto order sent ticket={ticket} lots={trade.get('volume', 0.0)}")
+
+        if self.persistence:
+            try:
+                self.persistence.save_trade({
+                    'timestamp': payload['timestamp'],
+                    'symbol': self.symbol,
+                    'direction': signal.direction,
+                    'entry': signal.entry_price,
+                    'sl': signal.stop_loss,
+                    'tp': signal.take_profit_primary,
+                    'lots': trade.get('volume', 0.0),
+                    'ticket': ticket,
+                    'status': 'SENT',
+                    'alert_level': 'ICT_ATM',
+                    'tier': 'ICT_ATM',
+                    'engine': 'ICT_ATM'
+                })
+            except Exception as exc:
+                print(f"⚠️ ICT ATM trade persist error: {exc}")
+
+        if self.order_manager:
+            try:
+                self.order_manager.register_new_order(
+                    ticket,
+                    signal.direction,
+                    signal.entry_price,
+                    signal.stop_loss,
+                    signal.take_profit_primary,
+                    'ICT_ATM',
+                    tier='ICT_ATM',
+                )
+            except Exception as exc:
+                print(f"⚠️ Order manager ICT ATM error: {exc}")
+        if self.campaign:
+            self.campaign.record(self.symbol, signal.direction, 'HIGH')
 
 # Example usage
 if __name__ == "__main__":
