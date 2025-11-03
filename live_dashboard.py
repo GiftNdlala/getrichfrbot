@@ -320,6 +320,25 @@ def engine_mode():
             return jsonify({'status': 'error', 'message': str(e)}), 400
     return jsonify({'status': 'no_stream'})
 
+@app.route('/api/trading_toggle', methods=['POST'])
+def trading_toggle():
+    global streams
+    payload = request.get_json(silent=True) or {}
+    symbol = payload.get('symbol') or request.args.get('symbol')
+    if not symbol:
+        symbol = get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    stream = streams.get(symbol)
+    if not stream:
+        return jsonify({'status': 'no_stream'}), 404
+    enabled = bool(payload.get('enabled', False))
+    stream.set_trading_enabled(enabled)
+    return jsonify({
+        'status': 'success',
+        'symbol': symbol,
+        'trading_enabled': stream.trading_enabled,
+        'engine_mode': stream.engine_mode
+    })
+
 @app.route('/api/nyupip/toggle', methods=['POST'])
 def nyupip_toggle():
     global streams
