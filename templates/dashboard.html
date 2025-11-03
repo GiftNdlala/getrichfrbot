@@ -555,8 +555,8 @@
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
                 <button id="btn-pause" style="padding:10px 16px; border-radius:8px; border:none; background:#f44336; color:#fff; font-weight:600; cursor:pointer;">Pause</button>
                 <button id="btn-resume" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">Resume</button>
-                <button id="btn-xau-stream-toggle" data-symbol="XAUUSDm" data-enabled="true" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">XAUUSDm: On</button>
-                <button id="btn-us30-stream-toggle" data-symbol="US30m" data-enabled="true" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">US30m: On</button>
+                <button id="btn-xau-stream-toggle" data-role="stream-toggle" data-symbol="XAUUSDm" data-enabled="true" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">XAUUSDm: On</button>
+                <button id="btn-us30-stream-toggle" data-role="stream-toggle" data-symbol="US30m" data-enabled="true" style="padding:10px 16px; border-radius:8px; border:none; background:#4CAF50; color:#fff; font-weight:600; cursor:pointer;">US30m: On</button>
                 <button id="btn-session-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#2196F3; color:#fff; font-weight:600; cursor:pointer;">Force Session On</button>
                 <button id="btn-farmer-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#9C27B0; color:#fff; font-weight:600; cursor:pointer;">Farmer: Off</button>
                 <button id="btn-low-toggle" style="padding:10px 16px; border-radius:8px; border:none; background:#607D8B; color:#fff; font-weight:600; cursor:pointer;">LOW: On</button>
@@ -783,6 +783,7 @@
         let countdownInterval;
         let nextUpdateTime = 30;
         let forceSessionOn = false;
+        window.primarySymbol = window.primarySymbol || null;
         
         async function fetchCurrentSignal() {
             try {
@@ -838,14 +839,58 @@
             try {
                 const res = await fetch('/api/status');
                 const st = await res.json();
-                updateFarmerBadge(st);
-                updateEngineToggleButtons(st);
-                updateNyupipStatus(st);
-                const modeSel = document.getElementById('engine-mode');
-                if (modeSel && st.engine_mode) {
-                    modeSel.value = st.engine_mode;
-                }
+                updateStreamStatus(st);
             } catch (e) {}
+
+            try {
+                const resUs = await fetch('/api/status?symbol=US30m');
+                const stUs = await resUs.json();
+                updateStreamStatus(stUs);
+            } catch (e) {}
+        }
+
+        function updateStreamStatus(status) {
+            if (!status || !status.symbol) return;
+            if (!window.primarySymbol) {
+                window.primarySymbol = status.symbol;
+            }
+            if (status.symbol === window.primarySymbol) {
+                updateFarmerBadge(status);
+                updateEngineToggleButtons(status);
+                updateNyupipStatus(status);
+                const modeSel = document.getElementById('engine-mode');
+                if (modeSel && status.engine_mode) {
+                    modeSel.value = status.engine_mode;
+                }
+            }
+
+            updateTradingButton(status.symbol, status.trading_enabled);
+        }
+
+        function updateTradingButton(symbol, enabled) {
+            if (!symbol) return;
+            const upperSymbol = symbol.toUpperCase();
+            const buttons = document.querySelectorAll('[data-role="stream-toggle"]');
+            let targetBtn = null;
+            buttons.forEach(btn => {
+                const btnSymbol = (btn.dataset.symbol || '').toUpperCase();
+                if (btnSymbol === upperSymbol) {
+                    targetBtn = btn;
+                }
+            });
+            if (!targetBtn) {
+                // Fallback by id hints
+                if (upperSymbol.includes('US30') || upperSymbol.includes('DJI')) {
+                    targetBtn = document.getElementById('btn-us30-stream-toggle');
+                } else {
+                    targetBtn = document.getElementById('btn-xau-stream-toggle');
+                }
+            }
+            if (!targetBtn) return;
+            targetBtn.dataset.symbol = symbol;
+            targetBtn.dataset.enabled = enabled ? 'true' : 'false';
+            targetBtn.textContent = `${symbol}: ${enabled ? 'On' : 'Off'}`;
+            targetBtn.style.background = enabled ? '#4CAF50' : '#9E9E9E';
         }
 
         function updateDashboard(data) {
@@ -1216,6 +1261,19 @@
                 forceSessionOn = !forceSessionOn;
                 e.target.textContent = forceSessionOn ? 'Force Session Off' : 'Force Session On';
                 try { await fetch('/api/session_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ force: forceSessionOn }) }); } catch {}
+            }
+            if (e.target && (e.target.id === 'btn-xau-stream-toggle' || e.target.id === 'btn-us30-stream-toggle')) {
+                const btn = e.target;
+                const symbol = btn.dataset.symbol;
+                const currentlyEnabled = btn.dataset.enabled === 'true';
+                try {
+                    await fetch('/api/trading_toggle', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ symbol, enabled: !currentlyEnabled })
+                    });
+                } catch (err) {}
+                fetchStatusOnly();
             }
             if (e.target && e.target.id === 'btn-farmer-toggle') {
                 const enabled = e.target.textContent.includes('Off');
