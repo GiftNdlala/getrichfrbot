@@ -365,6 +365,62 @@ def nyupip_status():
     state = s.get_nyupip_state()
     return jsonify({'status': 'success', 'symbol': sym, 'state': state})
 
+
+@app.route('/api/ict_swing/toggle', methods=['POST'])
+def ict_swing_toggle():
+    global streams
+    payload = request.get_json(silent=True) or {}
+    enabled = bool(payload.get('enabled', False))
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if not s:
+        return jsonify({'status': 'no_stream'}), 404
+    try:
+        s.set_ict_swing_enabled(enabled)
+        state = s.get_ict_swing_state()
+        return jsonify({'status': 'success', 'symbol': sym, 'enabled': state['enabled'], 'state': state})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/ict_swing/status')
+def ict_swing_status():
+    global streams
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if not s:
+        return jsonify({'status': 'no_stream'}), 404
+    state = s.get_ict_swing_state()
+    return jsonify({'status': 'success', 'symbol': sym, 'state': state})
+
+
+@app.route('/api/ict_atm/toggle', methods=['POST'])
+def ict_atm_toggle():
+    global streams
+    payload = request.get_json(silent=True) or {}
+    enabled = bool(payload.get('enabled', False))
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if not s:
+        return jsonify({'status': 'no_stream'}), 404
+    try:
+        s.set_ict_atm_enabled(enabled)
+        state = s.get_ict_atm_state()
+        return jsonify({'status': 'success', 'symbol': sym, 'enabled': state['enabled'], 'state': state})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/ict_atm/status')
+def ict_atm_status():
+    global streams
+    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    s = streams.get(sym)
+    if not s:
+        return jsonify({'status': 'no_stream'}), 404
+    state = s.get_ict_atm_state()
+    return jsonify({'status': 'success', 'symbol': sym, 'state': state})
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
