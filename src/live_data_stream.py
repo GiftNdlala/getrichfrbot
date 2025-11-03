@@ -9,10 +9,12 @@ import numpy as np
 import time
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Callable
+from typing import Dict, Optional, Callable, List
 import json
 import os
 from dataclasses import dataclass, asdict
+
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(__file__))
 
 from indicators import TechnicalIndicators
 from signal_generator import SignalGenerator
@@ -103,6 +105,21 @@ class LiveDataStream:
     Real-time data streaming and signal generation for XAUUSD
     """
     
+    @staticmethod
+    def _coerce_positive_int(value, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+        """Convert arbitrary input to a positive integer with safety guards."""
+        try:
+            ivalue = int(value)
+            if ivalue <= 0:
+                raise ValueError
+        except Exception:
+            ivalue = int(default)
+        if minimum is not None:
+            ivalue = max(ivalue, int(minimum))
+        if maximum is not None:
+            ivalue = min(ivalue, int(maximum))
+        return ivalue
+
     def __init__(self, symbol: str = "XAUUSD", update_interval: int = 30):
         """
         Initialize live data streaming
@@ -196,10 +213,15 @@ class LiveDataStream:
         # Callbacks for signal updates
         self.signal_callbacks = []
         
+        # History buffers (configurable)
+        history_limits_cfg = self.config.get('data_feed', {}).get('history_limits', {})
+        indicator_default = history_limits_cfg.get('indicator_m1', 400)
+        nyupip_default = history_limits_cfg.get('nyupip_m1', 7200)
+        self._history_limit_default = self._coerce_positive_int(indicator_default, 400, minimum=200)
+        self._nyupip_history_limit = self._coerce_positive_int(nyupip_default, 7200, minimum=4800)
+
         # Historical data for indicators (need minimum 200 periods)
         self.historical_data = self._fetch_initial_data()
-        self._history_limit_default = 400
-        self._nyupip_history_limit = 7200  # roughly 5 days of 1-minute bars
         base_cols = [col for col in ["Open", "High", "Low", "Close", "Volume"] if col in self.historical_data.columns]
         if base_cols:
             self.nyupip_history = self.historical_data[base_cols].copy()
@@ -269,56 +291,207 @@ class LiveDataStream:
         except Exception:
             return None
 
+    def _resolve_path(self, path: str, ensure_dir: bool = False) -> Optional[str]:
+        if not path:
+            return None
+        try:
+            formatted = path.format(symbol=self.symbol)
+        except Exception:
+            formatted = path
+        if os.path.isabs(formatted):
+            resolved = formatted
+        else:
+            resolved = os.path.join(WORKSPACE_ROOT, formatted)
+        if ensure_dir:
+            directory = os.path.dirname(resolved)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+        return resolved
+
+    def _hydrate_from_csv(self, path: str, min_rows: int) -> Optional[pd.DataFrame]:
+        resolved = self._resolve_path(path) if path else None
+        if not resolved:
+            return None
+        if not os.path.exists(resolved):
+            return None
+        try:
+            df = pd.read_csv(resolved)
+            if df is None or df.empty:
+                return None
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df.set_index('Date', inplace=True)
+            else:
+                df.index = pd.to_datetime(df.index)
+            rename_map = {
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close',
+                'volume': 'Volume',
+                'tick_volume': 'Volume',
+            }
+            for src, dst in rename_map.items():
+                if src in df.columns and dst not in df.columns:
+                    df.rename(columns={src: dst}, inplace=True)
+            expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            missing = [c for c in expected_cols if c not in df.columns]
+            if missing:
+                print(f"⚠️ Cached history missing columns {missing}; ignoring {resolved}")
+                return None
+            df = df[expected_cols].copy()
+            df.sort_index(inplace=True)
+            df = df[~df.index.duplicated(keep='last')]
+            if len(df) >= min_rows:
+                print(f"📦 Hydrated {len(df)} rows for {self.symbol} from cache {resolved}")
+            else:
+                print(f"ℹ️ Cache {resolved} contains {len(df)} rows (< {min_rows}); will top up from live sources")
+            return df
+        except Exception as exc:
+            print(f"⚠️ Failed to hydrate history from {resolved}: {exc}")
+            return None
+
+    def _write_history_csv(self, path: str, df: pd.DataFrame) -> None:
+        if path is None or df is None or df.empty:
+            return
+        try:
+            resolved = self._resolve_path(path, ensure_dir=True)
+            export_df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+            export_df = export_df.sort_index()
+            export_df.to_csv(resolved, index_label='Date')
+            print(f"💾 Cached {len(export_df)} rows for {self.symbol} to {resolved}")
+        except Exception as exc:
+            print(f"⚠️ Failed to cache history to {path}: {exc}")
+
+    def _mt5_fetch_initial_history(self, count: int) -> pd.DataFrame:
+        if not self.mt5:
+            return pd.DataFrame()
+        try:
+            import MetaTrader5 as mt5
+            count = self._coerce_positive_int(count, count, minimum=1000, maximum=50000)
+            rates = self.mt5.get_rates(mt5.TIMEFRAME_M1, count)
+            if rates is None or len(rates) == 0:
+                return pd.DataFrame()
+            df = pd.DataFrame(rates)
+            if df.empty:
+                return pd.DataFrame()
+            if 'time' not in df.columns:
+                return pd.DataFrame()
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            df.rename(columns={'time': 'Date', 'real_volume': 'Volume'}, inplace=True)
+            df.set_index('Date', inplace=True)
+            column_map = {
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close',
+                'tick_volume': 'Volume'
+            }
+            df = df.rename(columns=column_map)
+            expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            df = df[[c for c in expected_cols if c in df.columns]]
+            missing = [c for c in expected_cols if c not in df.columns]
+            if missing:
+                print(f"⚠️ MT5 history missing columns {missing}")
+                return pd.DataFrame()
+            df.sort_index(inplace=True)
+            df = df[~df.index.duplicated(keep='last')]
+            return df.tail(count)
+        except Exception as exc:
+            print(f"⚠️ MT5 history error: {exc}")
+            return pd.DataFrame()
+
+    def _merge_history_frames(self, frames: List[pd.DataFrame]) -> pd.DataFrame:
+        merged = None
+        for frame in frames:
+            if frame is None or frame.empty:
+                continue
+            merged = frame if merged is None else pd.concat([merged, frame])
+        if merged is None or merged.empty:
+            return pd.DataFrame()
+        merged.sort_index(inplace=True)
+        merged = merged[~merged.index.duplicated(keep='last')]
+        if len(merged) > self._nyupip_history_limit:
+            merged = merged.tail(self._nyupip_history_limit)
+        return merged
+
     def _fetch_initial_data(self) -> pd.DataFrame:
         """Fetch initial historical data for indicator calculations"""
         try:
             print("📊 Fetching initial historical data...")
-            
-            # Prefer MT5 historical data if available
-            if self.mt5:
-                try:
-                    import MetaTrader5 as mt5
-                    rates = self.mt5.get_rates(mt5.TIMEFRAME_M1, 2000)
-                    if rates is not None and len(rates) > 100:
-                        import pandas as pd
-                        df = pd.DataFrame(rates)
-                        df['time'] = pd.to_datetime(df['time'], unit='s')
-                        df = df.rename(columns={'time': 'Date', 'real_volume': 'Volume'})
-                        df.set_index('Date', inplace=True)
-                        df = df[['open','high','low','close','tick_volume']].rename(columns={'open':'Open','high':'High','low':'Low','close':'Close','tick_volume':'Volume'})
-                        data = df
-                    else:
-                        data = None
-                except Exception as e:
-                    print(f"⚠️ MT5 history error: {e}")
-                    data = None
-            else:
-                data = None
+            feeds_cfg = self.config.get('data_feed', {})
+            startup_cfg = feeds_cfg.get('startup_history', {})
+            min_rows = self._coerce_positive_int(startup_cfg.get('min_rows'), 4800, minimum=1000)
+            mt5_m1_bars = self._coerce_positive_int(startup_cfg.get('mt5_m1_bars'), self._nyupip_history_limit, minimum=min_rows)
+            hydrate_path = startup_cfg.get('hydrate_csv')
+            auto_cache = bool(startup_cfg.get('auto_cache', False))
 
-            # Fallbacks
-            if (data is None or data.empty):
+            sources: List[str] = []
+            frames: List[pd.DataFrame] = []
+
+            cached_df = self._hydrate_from_csv(hydrate_path, min_rows) if hydrate_path else None
+            if cached_df is not None and not cached_df.empty:
+                frames.append(cached_df)
+                sources.append(f"cache:{len(cached_df)}")
+
+            needs_mt5 = (cached_df is None) or len(cached_df) < min_rows
+            mt5_df = pd.DataFrame()
+            if self.mt5 and needs_mt5:
+                mt5_df = self._mt5_fetch_initial_history(mt5_m1_bars)
+                if mt5_df is not None and not mt5_df.empty:
+                    frames.append(mt5_df)
+                    sources.append(f"MT5:{len(mt5_df)}")
+
+            data = self._merge_history_frames(frames)
+
+            if auto_cache and hydrate_path and mt5_df is not None and not mt5_df.empty:
+                cache_payload = data if data is not None and not data.empty else mt5_df
+                self._write_history_csv(hydrate_path, cache_payload)
+
+            if data is None or data.empty or len(data) < min_rows:
+                fallback_data = None
                 if self.data_source is not None:
-                    data = self.data_source.get_historical_data(days=365)
-                else:
-                    # Generic fallback via Yahoo Finance only if allowed in backups
-                    feeds = self.config.get('data_feed', {})
-                    backups = feeds.get('backups', [])
-                    if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
-                        data = self._yf_get_historical()
-                    else:
-                        data = pd.DataFrame()
-            
-            if data.empty:
+                    try:
+                        fallback_data = self.data_source.get_historical_data(days=365)
+                    except Exception as exc:
+                        print(f"⚠️ Backup data source error: {exc}")
+                        fallback_data = None
+                if fallback_data is not None and not fallback_data.empty:
+                    try:
+                        fallback_data = fallback_data[["Open", "High", "Low", "Close", "Volume"]]
+                    except Exception:
+                        pass
+                    data = fallback_data
+                    source_label = getattr(self.data_source, 'data_source', 'DataSource')
+                    sources.append(f"{source_label}:{len(fallback_data)}")
+
+            if data is None or data.empty or len(data) < min_rows:
+                backups = feeds_cfg.get('backups', [])
+                if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
+                    yf_data = self._yf_get_historical()
+                    if yf_data is not None and not yf_data.empty:
+                        data = yf_data
+                        sources.append(f"YF:{len(yf_data)}")
+
+            if data is None or data.empty:
                 print("⚠️ No data received, using mock data")
                 return self._generate_mock_data()
-            
-            # Calculate all indicators on historical data
+
+            data = data.sort_index()
+            data = data[~data.index.duplicated(keep='last')]
+
+            if len(data) > self._nyupip_history_limit:
+                data = data.tail(self._nyupip_history_limit)
+
             data = self.indicators.calculate_all_indicators(data)
-            
+
+            if len(data) < min_rows:
+                print(f"⚠️ Startup history only has {len(data)} rows (< {min_rows}); NYUPIP will wait for additional bars")
+
             try:
-                source_name = getattr(self.data_source, 'data_source', 'Yahoo/MT5') if self.data_source else 'Yahoo/MT5'
+                source_name = " + ".join(sources) if sources else 'unknown'
             except Exception:
-                source_name = 'Yahoo/MT5'
+                source_name = 'unknown'
             print(f"✅ Loaded {len(data)} historical data points from {source_name}")
             return data
             
