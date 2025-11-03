@@ -154,6 +154,7 @@ class LiveDataStream:
         self.current_signal = None
         self.last_update = None
         self.is_running = False
+        self.trading_enabled = True
         self.persistence = PersistenceManager() if PersistenceManager else None
         self.autotrader = AutoTrader(symbol=self.symbol) if AutoTrader else None
         # Managers
@@ -962,7 +963,7 @@ class LiveDataStream:
                                 atr_val = float(latest.get('ATR_14', 0))
                                 self.event_engine.try_detect_spike(high, low, atr_val)
                                 idea = self.event_engine.generate_signal(current_quote['price'])
-                                if idea and not spread_block:
+                                if idea and not spread_block and self.trading_enabled:
                                     side = idea['direction']
                                     entry = idea['entry']
                                     sl = idea['sl']
@@ -988,7 +989,16 @@ class LiveDataStream:
                                 print(f"⚠️ Event engine error: {e}")
 
                         # Auto-trading (opt-in) with campaign and per-alert logic
-                        if self.autotrader and self.autotrader.enabled and live_signal.signal != 0 and not self._is_blackout_or_off_session() and not spread_block and not atr_block and not self.event_mode_enabled:
+                        if (
+                            self.autotrader
+                            and self.autotrader.enabled
+                            and self.trading_enabled
+                            and live_signal.signal != 0
+                            and not self._is_blackout_or_off_session()
+                            and not spread_block
+                            and not atr_block
+                            and not self.event_mode_enabled
+                        ):
                             # Respect per-symbol daily loss cap halt
                             if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
                                 print(f"⏸️ Halt new orders (daily cap) for {self.symbol}")
@@ -1107,7 +1117,7 @@ class LiveDataStream:
                             try:
                                 # Farmer runs independently every cycle when a non-HOLD signal exists,
                                 # but piggybacks the HIGH campaign gate.
-                                if farmer_allowed and live_signal.signal != 0:
+                                if farmer_allowed and self.trading_enabled and live_signal.signal != 0:
                                     now = datetime.now()
                                     if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= self.farmer_cycle_seconds:
                                         self._farmer_last_cycle = now
@@ -1226,6 +1236,7 @@ class LiveDataStream:
             'nyupip_enabled': self.nyupip_enabled,
             'nyupip_last_signal': self.nyupip_state.get('last_signal'),
             'nyupip_last_diagnostics': self.nyupip_state.get('last_diagnostics'),
+            'trading_enabled': self.trading_enabled,
         }
 
     def set_farmer_enabled(self, enabled: bool):
@@ -1242,6 +1253,9 @@ class LiveDataStream:
 
     def set_event_mode(self, enabled: bool):
         self.event_mode_enabled = bool(enabled)
+
+    def set_trading_enabled(self, enabled: bool):
+        self.trading_enabled = bool(enabled)
 
     def set_engine_mode(self, mode: str):
         allowed = {'ALL', 'FARMER_ONLY', 'LOW_ONLY', 'MEDIUM_ONLY', 'HIGH_ONLY', 'EVENT_ONLY', 'NONE'}
@@ -1342,6 +1356,7 @@ class LiveDataStream:
         can_trade = (
             self.autotrader
             and self.autotrader.enabled
+            and self.trading_enabled
             and not spread_block
             and not atr_block
             and not self.event_mode_enabled
