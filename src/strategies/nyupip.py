@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -71,6 +71,14 @@ class NYUPIPStrategy:
         self.enable_rsi_confirmation = enable_rsi_confirmation
         self._indicators = TechnicalIndicators()
         self._last_signal_time: Dict[str, Optional[datetime]] = {"1HSMA": None, "CIS": None}
+        self._context_snapshot: Dict[str, Any] = {}
+        self._last_diagnostics: Dict[str, Any] = {
+            "status": "init",
+            "reason": None,
+            "summary": {},
+            "modules": {},
+            "signals": [],
+        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -82,24 +90,52 @@ class NYUPIPStrategy:
     ) -> List[NYUPIPSignal]:
         """Return zero or more actionable signals for the current tick."""
 
+        self._last_diagnostics = {
+            "status": "init",
+            "reason": None,
+            "summary": {},
+            "modules": {},
+            "signals": [],
+        }
+
         if historical_data is None or historical_data.empty or not current_quote:
+            self._last_diagnostics.update({"status": "skipped", "reason": "missing_input"})
             return []
 
         context = self._build_context(historical_data, current_quote)
+        self._last_diagnostics["summary"] = dict(self._context_snapshot)
+
         if not context:
+            reason = self._context_snapshot.get("reason", "context_unavailable")
+            self._last_diagnostics.update({"status": "skipped", "reason": reason})
             return []
 
         signals: List[NYUPIPSignal] = []
+        modules: Dict[str, Dict[str, Any]] = {}
 
         try:
-            signals.extend(self._evaluate_1hsma(context))
+            module_signals, module_diag = self._evaluate_1hsma(context)
+            modules["1HSMA"] = module_diag
+            signals.extend(module_signals)
         except Exception as exc:  # pragma: no cover - defensive logging only
+            modules["1HSMA"] = {"module": "1HSMA", "status": "error", "reason": str(exc)}
             print(f"[NYUPIP] 1HSMA evaluation error: {exc}")
 
         try:
-            signals.extend(self._evaluate_cis(context))
+            module_signals, module_diag = self._evaluate_cis(context)
+            modules["CIS"] = module_diag
+            signals.extend(module_signals)
         except Exception as exc:  # pragma: no cover - defensive logging only
+            modules["CIS"] = {"module": "CIS", "status": "error", "reason": str(exc)}
             print(f"[NYUPIP] CIS evaluation error: {exc}")
+
+        self._last_diagnostics["modules"] = modules
+        self._last_diagnostics["signals"] = [sig.to_payload() for sig in signals]
+
+        if signals:
+            self._last_diagnostics.update({"status": "signal", "reason": "signal_generated"})
+        else:
+            self._last_diagnostics.update({"status": "hold", "reason": "no_module_triggered"})
 
         return signals
 
@@ -111,6 +147,24 @@ class NYUPIPStrategy:
     ) -> Optional[Dict[str, object]]:
         data = historical_data.copy()
         data = data.sort_index()
+        self._context_snapshot = {
+            "history_rows": int(len(data)) if data is not None else 0,
+            "h1_bars": 0,
+            "m15_bars": 0,
+            "reason": None,
+        }
+
+        def _to_float(value: Optional[float]) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                if isinstance(value, (np.floating, np.integer)):
+                    value = float(value)
+                if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+                    return None
+                return float(value) if isinstance(value, (int, float)) else value
+            except Exception:
+                return None
         try:
             data.index = pd.DatetimeIndex(data.index).tz_localize(None)
         except (AttributeError, TypeError):
@@ -122,10 +176,16 @@ class NYUPIPStrategy:
         current_ts_sast = current_ts_raw.tz_convert(self.timezone)
         current_ts = current_ts_sast.tz_localize(None)
 
-        h1 = self._resample_ohlc(data, "1H")
-        m15 = self._resample_ohlc(data, "15T")
+        h1 = self._resample_ohlc(data, "1h")
+        m15 = self._resample_ohlc(data, "15min")
+
+        self._context_snapshot.update({
+            "h1_bars": int(len(h1)) if h1 is not None else 0,
+            "m15_bars": int(len(m15)) if m15 is not None else 0,
+        })
 
         if h1 is None or m15 is None or len(h1) < 80 or len(m15) < 40:
+            self._context_snapshot["reason"] = "insufficient_history"
             return None
 
         h1 = self._indicators.add_sma(h1, periods=[50])
@@ -167,12 +227,26 @@ class NYUPIPStrategy:
         if not np.isnan(atr_current) and not np.isnan(atr_avg) and atr_avg > 0:
             atr_valid = atr_current >= atr_avg * self.atr_multiplier
 
-        m15_closed = m15[m15.index <= current_ts.floor("15T")]
-        if len(m15_closed) >= 2 and m15_closed.index[-1] == current_ts.floor("15T"):
+        m15_closed = m15[m15.index <= current_ts.floor("15min")]
+        if len(m15_closed) >= 2 and m15_closed.index[-1] == current_ts.floor("15min"):
             # Remove potentially forming bar
             m15_closed = m15_closed.iloc[:-1]
 
         m15_sast = self._convert_to_timezone(m15, self.timezone)
+
+        self._context_snapshot.update({
+            "reason": "ok",
+            "timestamp": current_ts.isoformat(),
+            "current_price": current_price,
+            "trend_bias": trend_bias,
+            "zone_valid": bool(zone_valid),
+            "atr_valid": bool(atr_valid),
+            "trendline_valid": bool(trendline_valid),
+            "zone_distance": _to_float(zone_distance),
+            "zone_threshold": _to_float(zone_threshold),
+            "atr_current": _to_float(atr_current),
+            "atr_avg": _to_float(atr_avg),
+        })
 
         return {
             "timestamp": current_ts,
@@ -234,35 +308,62 @@ class NYUPIPStrategy:
     # ------------------------------------------------------------------
     # Strategy modules
     # ------------------------------------------------------------------
-    def _evaluate_1hsma(self, ctx: Dict[str, object]) -> List[NYUPIPSignal]:
-        if ctx.get("trend_bias") not in {"LONG", "SHORT"}:
-            return []
-        if not ctx.get("zone_valid") or not ctx.get("trendline_valid"):
-            return []
+    def _evaluate_1hsma(self, ctx: Dict[str, object]) -> Tuple[List[NYUPIPSignal], Dict[str, Any]]:
+        diag: Dict[str, Any] = {
+            "module": "1HSMA",
+            "status": "skipped",
+            "reason": None,
+            "trend_bias": ctx.get("trend_bias"),
+            "zone_valid": bool(ctx.get("zone_valid")),
+            "atr_valid": bool(ctx.get("atr_valid")),
+            "trendline_valid": bool(ctx.get("trendline_valid")),
+        }
+        signals: List[NYUPIPSignal] = []
+
+        trend_bias = ctx.get("trend_bias")
+        if trend_bias not in {"LONG", "SHORT"}:
+            diag["reason"] = "trend_bias_missing"
+            return signals, diag
+
+        if not ctx.get("zone_valid"):
+            diag["reason"] = "zone_invalid"
+            return signals, diag
+
+        if not ctx.get("trendline_valid"):
+            diag["reason"] = "trendline_invalid"
+            return signals, diag
+
         if not ctx.get("atr_valid"):
-            return []
+            diag["reason"] = "atr_filter_failed"
+            return signals, diag
 
-        m15_closed: pd.DataFrame = ctx["m15_closed"]  # type: ignore[assignment]
+        m15_closed: pd.DataFrame = ctx.get("m15_closed")  # type: ignore[assignment]
         if m15_closed is None or len(m15_closed) < 5:
-            return []
+            diag["reason"] = "insufficient_m15_history"
+            return signals, diag
 
-        pattern = self._detect_price_action(m15_closed, ctx["trend_bias"] == "LONG")
+        pattern = self._detect_price_action(m15_closed, trend_bias == "LONG")
         if not pattern:
-            return []
+            diag["reason"] = "no_price_action_pattern"
+            return signals, diag
+        diag["pattern"] = pattern
 
         if self.enable_rsi_confirmation:
             rsi_series = m15_closed.get("RSI_14")
             if isinstance(rsi_series, pd.Series):
                 rsi_value = float(rsi_series.iloc[-1])
-                if ctx["trend_bias"] == "LONG" and rsi_value < 50:
-                    return []
-                if ctx["trend_bias"] == "SHORT" and rsi_value > 50:
-                    return []
+                diag["rsi"] = rsi_value
+                if trend_bias == "LONG" and rsi_value < 50:
+                    diag["reason"] = "rsi_filter_blocked_long"
+                    return signals, diag
+                if trend_bias == "SHORT" and rsi_value > 50:
+                    diag["reason"] = "rsi_filter_blocked_short"
+                    return signals, diag
 
         current_price = float(ctx["current_price"])  # type: ignore[assignment]
         atr_current = float(ctx.get("atr_current") or 0)
         h1: pd.DataFrame = ctx["h1"]  # type: ignore[assignment]
-        direction = 1 if ctx["trend_bias"] == "LONG" else -1
+        direction = 1 if trend_bias == "LONG" else -1
 
         if direction == 1:
             swing_low = float(m15_closed["Low"].iloc[-5:-1].min())
@@ -287,15 +388,24 @@ class NYUPIPStrategy:
         if (direction == 1 and stop_loss >= current_price) or (
             direction == -1 and stop_loss <= current_price
         ):
-            return []
+            diag.update({
+                "reason": "invalid_stop_loss",
+                "entry": round(current_price, 3),
+                "stop_loss": round(stop_loss, 3),
+            })
+            return signals, diag
 
         risk_reward = abs((take_profit - current_price) / (current_price - stop_loss))
+        diag["risk_reward"] = round(risk_reward, 2)
+
         if risk_reward < 1.5:
-            return []
+            diag["reason"] = "risk_reward_below_threshold"
+            return signals, diag
 
         signal_time = ctx["timestamp"]  # type: ignore[assignment]
         if not self._cooldown_passed("1HSMA", signal_time):
-            return []
+            diag["reason"] = "cooldown_active"
+            return signals, diag
 
         metadata = {
             "label_a_distance": round(float(ctx.get("zone_distance") or 0), 3),
@@ -305,6 +415,12 @@ class NYUPIPStrategy:
             "module": "1HSMA",
         }
 
+        take_profit_secondary = (
+            current_price + (take_profit - current_price) * 1.5
+            if direction == 1
+            else current_price - (current_price - take_profit) * 1.5
+        )
+
         signal = NYUPIPSignal(
             timestamp=signal_time.to_pydatetime(),
             symbol=self.symbol,
@@ -313,7 +429,7 @@ class NYUPIPStrategy:
             entry_price=current_price,
             stop_loss=stop_loss,
             take_profit_primary=take_profit,
-            take_profit_secondary=current_price + (take_profit - current_price) * 1.5 if direction == 1 else current_price - (current_price - take_profit) * 1.5,
+            take_profit_secondary=take_profit_secondary,
             take_profit_tertiary=None,
             risk_percent=self.risk_percent,
             risk_reward=risk_reward,
@@ -322,57 +438,99 @@ class NYUPIPStrategy:
         )
 
         self._last_signal_time["1HSMA"] = signal_time
-        return [signal]
 
-    def _evaluate_cis(self, ctx: Dict[str, object]) -> List[NYUPIPSignal]:
-        if ctx.get("trend_bias") not in {"LONG", "SHORT"}:
-            return []
+        diag.update({
+            "status": "signal",
+            "reason": "signal_generated",
+            "direction": "LONG" if direction == 1 else "SHORT",
+            "entry": round(current_price, 3),
+            "stop_loss": round(stop_loss, 3),
+            "take_profit": round(take_profit, 3),
+        })
+
+        signals.append(signal)
+        return signals, diag
+
+    def _evaluate_cis(self, ctx: Dict[str, object]) -> Tuple[List[NYUPIPSignal], Dict[str, Any]]:
+        diag: Dict[str, Any] = {
+            "module": "CIS",
+            "status": "skipped",
+            "reason": None,
+            "trend_bias": ctx.get("trend_bias"),
+            "atr_valid": bool(ctx.get("atr_valid")),
+        }
+        signals: List[NYUPIPSignal] = []
+
+        trend_bias = ctx.get("trend_bias")
+        if trend_bias not in {"LONG", "SHORT"}:
+            diag["reason"] = "trend_bias_missing"
+            return signals, diag
+
         if not ctx.get("atr_valid"):
-            return []
+            diag["reason"] = "atr_filter_failed"
+            return signals, diag
 
         now_sast: datetime = ctx["timestamp_tz"]  # type: ignore[assignment]
+        diag["timestamp"] = now_sast.isoformat()
         if now_sast.time() < time(15, 10) or now_sast.time() > time(15, 30):
-            return []
+            diag["reason"] = "outside_trade_window"
+            return signals, diag
 
         m15_sast: pd.DataFrame = ctx["m15_sast"]  # type: ignore[assignment]
         if m15_sast is None or m15_sast.empty:
-            return []
+            diag["reason"] = "no_intraday_data"
+            return signals, diag
 
         today_mask = m15_sast.index.date == now_sast.date()
         today_data = m15_sast.loc[today_mask]
         if today_data.empty:
-            return []
+            diag["reason"] = "no_today_data"
+            return signals, diag
 
         c1445 = self._find_candle(today_data, time(14, 45))
         c1515 = self._find_candle(today_data, time(15, 15))
         if c1445 is None or c1515 is None:
-            return []
+            diag["reason"] = "required_candles_missing"
+            return signals, diag
 
         direction = None
-        if c1445["Close"] > c1445["Open"] and ctx["trend_bias"] == "LONG":
+        if c1445["Close"] > c1445["Open"] and trend_bias == "LONG":
             direction = 1
-        elif c1445["Close"] < c1445["Open"] and ctx["trend_bias"] == "SHORT":
+        elif c1445["Close"] < c1445["Open"] and trend_bias == "SHORT":
             direction = -1
         else:
-            return []
+            diag["reason"] = "bias_candle_mismatch"
+            return signals, diag
 
         entry_price = float(c1515["Close"])
         stop_loss = float(c1445["Open"])
 
         if direction == 1 and stop_loss >= entry_price:
-            return []
+            diag.update({
+                "reason": "invalid_stop_loss",
+                "entry": round(entry_price, 3),
+                "stop_loss": round(stop_loss, 3),
+            })
+            return signals, diag
         if direction == -1 and stop_loss <= entry_price:
-            return []
+            diag.update({
+                "reason": "invalid_stop_loss",
+                "entry": round(entry_price, 3),
+                "stop_loss": round(stop_loss, 3),
+            })
+            return signals, diag
 
         previous_day = now_sast.date() - timedelta(days=1)
         prev_mask = m15_sast.index.date == previous_day
         prev_day_data = m15_sast.loc[prev_mask]
         if prev_day_data.empty:
-            return []
+            diag["reason"] = "no_previous_day_data"
+            return signals, diag
 
         ny_session = prev_day_data.between_time("13:00", "21:00")
         if ny_session.empty:
-            return []
+            diag["reason"] = "ny_session_missing"
+            return signals, diag
 
         if direction == 1:
             take_profit = float(ny_session["High"].max())
@@ -384,12 +542,15 @@ class NYUPIPStrategy:
                 take_profit = entry_price - abs(stop_loss - entry_price) * 2
 
         risk_reward = abs((take_profit - entry_price) / (entry_price - stop_loss))
+        diag["risk_reward"] = round(risk_reward, 2)
         if risk_reward < 1.5:
-            return []
+            diag["reason"] = "risk_reward_below_threshold"
+            return signals, diag
 
         signal_time = ctx["timestamp"]  # type: ignore[assignment]
         if not self._cooldown_passed("CIS", signal_time):
-            return []
+            diag["reason"] = "cooldown_active"
+            return signals, diag
 
         metadata = {
             "module": "CIS",
@@ -414,7 +575,18 @@ class NYUPIPStrategy:
         )
 
         self._last_signal_time["CIS"] = signal_time
-        return [signal]
+
+        diag.update({
+            "status": "signal",
+            "reason": "signal_generated",
+            "direction": "LONG" if direction == 1 else "SHORT",
+            "entry": round(entry_price, 3),
+            "stop_loss": round(stop_loss, 3),
+            "take_profit": round(take_profit, 3),
+        })
+
+        signals.append(signal)
+        return signals, diag
 
     # ------------------------------------------------------------------
     # Pattern helpers
@@ -494,3 +666,13 @@ class NYUPIPStrategy:
         if last_time is None:
             return True
         return (current_time - last_time) >= self.cooldown
+
+    def get_last_diagnostics(self) -> Dict[str, Any]:
+        """Return the most recent evaluation snapshot for external consumers."""
+        return {
+            "status": self._last_diagnostics.get("status"),
+            "reason": self._last_diagnostics.get("reason"),
+            "summary": dict(self._last_diagnostics.get("summary", {})),
+            "modules": dict(self._last_diagnostics.get("modules", {})),
+            "signals": list(self._last_diagnostics.get("signals", [])),
+        }
