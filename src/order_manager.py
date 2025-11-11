@@ -128,14 +128,25 @@ class OrderManager:
 					if hasattr(self.mt5, 'get_deals_for_position'):
 						deals = self.mt5.get_deals_for_position(ticket)
 					if not deals:
-						deals = self.mt5.get_orders_history(count=200)
+						deals = self.mt5.get_orders_history(count=500)
+					
+					# Find the exit deal for this position (deal_type 1 = exit, 0 = entry)
 					closing_deal = None
 					for d in deals or []:
-						pos_id = getattr(d, 'position_id', None)
-						if pos_id != ticket:
+						# Check position field (not position_id) and deal type
+						pos = getattr(d, 'position', None)
+						deal_type = getattr(d, 'type', None)
+						
+						if pos != ticket:
 							continue
-						if not closing_deal or getattr(d, 'time', 0) >= getattr(closing_deal, 'time', 0):
+						
+						# Look for exit deal (type 1) or just the latest deal
+						if deal_type == 1:  # Exit deal
+							if not closing_deal or getattr(d, 'time', 0) >= getattr(closing_deal, 'time', 0):
+								closing_deal = d
+						elif not closing_deal:  # Fallback to any deal
 							closing_deal = d
+					
 					if closing_deal:
 						close_price = float(getattr(closing_deal, 'price', 0.0))
 						pnl = float(getattr(closing_deal, 'profit', 0.0))
@@ -144,13 +155,17 @@ class OrderManager:
 							ts = getattr(closing_deal, 'time', None)
 							if ts:
 								close_time_iso = _dt.datetime.fromtimestamp(ts).isoformat()
-						except Exception:
-							pass
-				except Exception:
-					pass
+						except Exception as e:
+							print(f"⚠️ Error parsing close time for ticket {ticket}: {e}")
+					else:
+						print(f"⚠️ No closing deal found for ticket {ticket} in {len(deals or [])} deals")
+				except Exception as e:
+					print(f"❌ Error fetching close data for ticket {ticket}: {e}")
+				
 				payload = {'status': 'CLOSED'}
-				if close_price is not None:
+				if close_price is not None and close_price > 0:
 					payload['close_price'] = close_price
+					print(f"✅ Saved close_price={close_price:.2f} for ticket {ticket}")
 				if close_time_iso is not None:
 					payload['close_time'] = close_time_iso
 				if pnl is not None:
