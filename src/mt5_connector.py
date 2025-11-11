@@ -109,6 +109,15 @@ class MT5Connector:
 		except Exception:
 			return []
 
+	def get_deals_for_position(self, position_id: int):
+		if not self.initialized and not self.initialize():
+			return []
+		try:
+			deals = mt5.history_deals_get(position=position_id)
+			return deals or []
+		except Exception:
+			return []
+
 	def get_equity(self) -> Optional[float]:
 		if not self.initialized and not self.initialize():
 			return None

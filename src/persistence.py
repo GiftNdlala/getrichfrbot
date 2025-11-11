@@ -123,9 +123,29 @@ class PersistenceManager:
 			conn.commit()
 
 	def update_trade(self, ticket: int, fields: Dict[str, Any]) -> None:
+		if not fields:
+			return
 		with sqlite3.connect(self.db_path) as conn:
-			if not fields:
-				return
+			conn.row_factory = sqlite3.Row
+			row = conn.execute("SELECT direction, entry, lots FROM trades WHERE ticket = ?", (ticket,)).fetchone()
+			if row:
+				needs_close_price = (
+					'close_price' not in fields
+					or fields.get('close_price') in (None, '', '-')
+				)
+				pnl_value = fields.get('pnl')
+				if needs_close_price and pnl_value not in (None, '', '-'):
+					try:
+						direction = int(row['direction']) if row['direction'] is not None else None
+						entry = float(row['entry']) if row['entry'] is not None else None
+						lots = float(row['lots']) if row['lots'] not in (None, 0) else 0.01
+						pnl_float = float(pnl_value)
+						if direction in (1, -1) and entry is not None and lots not in (None, 0):
+							price_delta = pnl_float / (lots * 100.0)
+							close_price = entry + price_delta if direction == 1 else entry - price_delta
+							fields['close_price'] = close_price
+					except Exception:
+						pass
 			set_clause = ', '.join([f"{k} = ?" for k in fields.keys()])
 			values = list(fields.values()) + [ticket]
 			conn.execute(f"UPDATE trades SET {set_clause} WHERE ticket = ?", values)

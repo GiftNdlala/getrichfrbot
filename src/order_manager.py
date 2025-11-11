@@ -124,20 +124,28 @@ class OrderManager:
 				close_time_iso = None
 				pnl = None
 				try:
-					deals = self.mt5.get_orders_history(count=200)
-					for d in (deals or [])[::-1]:  # newest first
+					deals = []
+					if hasattr(self.mt5, 'get_deals_for_position'):
+						deals = self.mt5.get_deals_for_position(ticket)
+					if not deals:
+						deals = self.mt5.get_orders_history(count=200)
+					closing_deal = None
+					for d in deals or []:
 						pos_id = getattr(d, 'position_id', None)
-						if pos_id == ticket:
-							close_price = float(getattr(d, 'price', 0.0))
-							pnl = float(getattr(d, 'profit', 0.0))
-							try:
-								import datetime as _dt
-								ts = getattr(d, 'time', None)
-								if ts:
-									close_time_iso = _dt.datetime.fromtimestamp(ts).isoformat()
-							except Exception:
-								pass
-							break
+						if pos_id != ticket:
+							continue
+						if not closing_deal or getattr(d, 'time', 0) >= getattr(closing_deal, 'time', 0):
+							closing_deal = d
+					if closing_deal:
+						close_price = float(getattr(closing_deal, 'price', 0.0))
+						pnl = float(getattr(closing_deal, 'profit', 0.0))
+						try:
+							import datetime as _dt
+							ts = getattr(closing_deal, 'time', None)
+							if ts:
+								close_time_iso = _dt.datetime.fromtimestamp(ts).isoformat()
+						except Exception:
+							pass
 				except Exception:
 					pass
 				payload = {'status': 'CLOSED'}
