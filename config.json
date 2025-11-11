@@ -54,12 +54,14 @@
     "demo_only": false,
     "slippage_points": 100,
     "deviation_points": 180,
-    "campaign_window_minutes": 10,
-    "min_seconds_between_entries": 60,
+    "campaign_window_minutes": 5,
+    "min_seconds_between_entries": 10,
     "campaign_max_trades": {
       "LOW": 6,
       "MEDIUM": 6,
-      "HIGH": 9
+      "HIGH": 30,
+      "HIGH_SWING": 30,
+      "HIGH_ATM": 30
     },
     "max_position_minutes": {
       "LOW": 10,
@@ -67,7 +69,7 @@
       "HIGH": 20
     },
     "high_tier_tp_pips": {
-      "tier1_count": 1,
+      "tier1_count": 1, 
       "tier1_pips": 4,
       "tier2_count": 0,
       "tier2_pips": 0

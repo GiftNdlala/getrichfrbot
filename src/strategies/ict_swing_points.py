@@ -122,7 +122,10 @@ class ICTSwingPointsStrategy:
 
         signals: List[ICTSwingSignal] = []
 
-        if self.symbol != "XAUUSD":
+        # Support any gold symbol (XAUUSD, XAUUSDm, GOLD, etc.)
+        symbol_upper = (self.symbol or "").upper()
+        is_gold = ("XAU" in symbol_upper) or ("GOLD" in symbol_upper)
+        if not is_gold:
             diagnostics.update({"status": "skipped", "reason": "unsupported_symbol"})
             self._last_diagnostics = diagnostics
             return signals, diagnostics

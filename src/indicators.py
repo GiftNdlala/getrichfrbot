@@ -212,11 +212,16 @@ class TechnicalIndicators:
         Returns:
             pd.DataFrame: Data with volume indicators added
         """
-        # Volume SMA
-        data['Volume_SMA_20'] = data['Volume'].rolling(window=20).mean()
+        # Volume SMA (ensure we operate on a Series even if 'Volume' is a 1-col DataFrame)
+        vol_col = data.get('Volume')
+        if isinstance(vol_col, pd.DataFrame):
+            vol_series = vol_col.iloc[:, 0]
+        else:
+            vol_series = vol_col
+        data['Volume_SMA_20'] = vol_series.rolling(window=20).mean()
         
         # Volume ratio (current volume / average volume)
-        data['Volume_Ratio'] = data['Volume'] / data['Volume_SMA_20']
+        data['Volume_Ratio'] = vol_series / data['Volume_SMA_20']
         
         # On-Balance Volume (OBV)
         obv = (np.sign(data['Close'].diff()) * data['Volume']).fillna(0).cumsum()
@@ -261,6 +266,24 @@ class TechnicalIndicators:
             pd.DataFrame: Data with all indicators added
         """
         print("Calculating technical indicators...")
+        # Defensive: ensure datetime index, sorted, and de-duplicated to avoid
+        # reindex errors like "cannot reindex on an axis with duplicate labels"
+        data = data.copy()
+        try:
+            if not isinstance(data.index, pd.DatetimeIndex):
+                # Common upstream column names for time
+                for tcol in ("time", "Time", "timestamp", "Timestamp"):
+                    if tcol in data.columns:
+                        data[tcol] = pd.to_datetime(data[tcol], errors='coerce', utc=True)
+                        data = data.set_index(tcol)
+                        break
+            # Drop duplicate index stamps, keep last, and sort
+            if getattr(data.index, "has_duplicates", False):
+                data = data[~data.index.duplicated(keep='last')]
+            data = data.sort_index()
+        except Exception:
+            # Continue with best-effort if sanitation fails
+            pass
         
         # Moving averages
         data = self.add_sma(data, periods=[20, 50, 200])

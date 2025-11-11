@@ -178,7 +178,7 @@ class LiveDataStream:
         self.current_signal = None
         self.last_update = None
         self.is_running = False
-        self.trading_enabled = True
+        self.trading_enabled = False  # Default: OFF - user must enable manually
         self.persistence = PersistenceManager() if PersistenceManager else None
         self.autotrader = AutoTrader(symbol=self.symbol) if AutoTrader else None
         # Managers
@@ -198,10 +198,10 @@ class LiveDataStream:
         self.farmer_enabled = bool(farmer_cfg.get('enabled', False))
         self._farmer_default_enabled = self.farmer_enabled
         self.farmer_cycle_seconds = int(farmer_cfg.get('cycle_seconds', 120))
-        # Engine toggles
-        self.enable_low = True
-        self.enable_medium = True
-        self.enable_high = True
+        # Engine toggles - Default: OFF - user must enable manually
+        self.enable_low = False
+        self.enable_medium = False
+        self.enable_high = False
         # Event engine
         self.event_engine = EventEngine(self.symbol) if EventEngine else None
         # Ensure MT5 uses this stream's symbol and reinitialize if needed
@@ -214,8 +214,8 @@ class LiveDataStream:
                 self.mt5.initialize()
         except Exception:
             pass
-        # Global engine mode
-        self.engine_mode = 'ALL'
+        # Global engine mode - Default: NONE - user must manually select a mode
+        self.engine_mode = 'NONE'
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -375,6 +375,9 @@ class LiveDataStream:
                 print(f"⚠️ Cached history missing columns {missing}; ignoring {resolved}")
                 return None
             df = df[expected_cols].copy()
+            # Drop duplicate column labels if any (e.g., both tick_volume and real_volume mapped to Volume)
+            if getattr(df.columns, "duplicated", None) is not None:
+                df = df.loc[:, ~df.columns.duplicated(keep='last')]
             df.sort_index(inplace=True)
             df = df[~df.index.duplicated(keep='last')]
             if len(df) >= min_rows:
@@ -425,6 +428,9 @@ class LiveDataStream:
             df = df.rename(columns=column_map)
             expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
             df = df[[c for c in expected_cols if c in df.columns]]
+            # Drop duplicate column labels if any after renames
+            if getattr(df.columns, "duplicated", None) is not None:
+                df = df.loc[:, ~df.columns.duplicated(keep='last')]
             missing = [c for c in expected_cols if c not in df.columns]
             if missing:
                 print(f"⚠️ MT5 history missing columns {missing}")
@@ -445,6 +451,9 @@ class LiveDataStream:
         if merged is None or merged.empty:
             return pd.DataFrame()
         merged.sort_index(inplace=True)
+        # Ensure no duplicate column labels after merges
+        if getattr(merged.columns, "duplicated", None) is not None:
+            merged = merged.loc[:, ~merged.columns.duplicated(keep='last')]
         merged = merged[~merged.index.duplicated(keep='last')]
         if len(merged) > self._nyupip_history_limit:
             merged = merged.tail(self._nyupip_history_limit)
@@ -513,6 +522,9 @@ class LiveDataStream:
                 return self._generate_mock_data()
 
             data = data.sort_index()
+            # Drop duplicate column labels defensively before indicators
+            if getattr(data.columns, "duplicated", None) is not None:
+                data = data.loc[:, ~data.columns.duplicated(keep='last')]
             data = data[~data.index.duplicated(keep='last')]
 
             if len(data) > self._nyupip_history_limit:
@@ -1382,13 +1394,40 @@ class LiveDataStream:
 
                         if self.nyupip_enabled:
                             try:
+                                eval_time = datetime.now().strftime("%H:%M:%S")
                                 nyupip_history = self._get_nyupip_history()
+                                
+                                if nyupip_history is None or nyupip_history.empty:
+                                    print(f"🔍 [{eval_time}] NYUPIP: Evaluating | ⚠️ No history data available")
+                                else:
+                                    print(f"🔍 [{eval_time}] NYUPIP: Evaluating | History: {len(nyupip_history)} bars")
+                                
                                 nyupip_signals = self.nyupip_strategy.evaluate(nyupip_history.copy(), current_quote)
                                 self.nyupip_state['last_diagnostics'] = self.nyupip_strategy.get_last_diagnostics()
-                                for nyupip_signal in nyupip_signals:
-                                    self._process_nyupip_signal(nyupip_signal, spread_block, atr_block)
+                                
+                                diag = self.nyupip_state.get('last_diagnostics', {})
+                                status = diag.get('status', 'unknown')
+                                reason = diag.get('reason', 'no_reason')
+                                
+                                if nyupip_signals:
+                                    print(f"✅ [{eval_time}] NYUPIP: {len(nyupip_signals)} signal(s) generated | Status: {status}")
+                                    for nyupip_signal in nyupip_signals:
+                                        self._process_nyupip_signal(nyupip_signal, spread_block, atr_block)
+                                else:
+                                    # Format reason for readability
+                                    reason_display = reason.replace('_', ' ').title() if reason else 'No signal conditions met'
+                                    print(f"⏸️ [{eval_time}] NYUPIP: No signals | Status: {status} | Reason: {reason_display}")
+                                    
+                                    # Show detailed diagnostics if available
+                                    if diag.get('summary'):
+                                        summary = diag['summary']
+                                        zone_status = "✓" if summary.get('zone_valid') else "✗"
+                                        atr_status = "✓" if summary.get('atr_valid') else "✗"
+                                        trendline_status = "✓" if summary.get('trendline_valid') else "✗"
+                                        print(f"   └─ Zone: {zone_status} | ATR: {atr_status} | Trendline: {trendline_status}")
+                                        
                             except Exception as e:
-                                print(f"⚠️ NYUPIP processing error: {e}")
+                                print(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] NYUPIP processing error: {e}")
 
                         strategy_history = None
                         try:
@@ -1405,21 +1444,76 @@ class LiveDataStream:
 
                         if self.ict_swing_enabled and self.ict_swing_strategy and self._is_gold_symbol():
                             try:
+                                eval_time = datetime.now().strftime("%H:%M:%S")
+                                
+                                if strategy_history is None or strategy_history.empty:
+                                    print(f"🔍 [{eval_time}] ICT Swing: Evaluating | ⚠️ No history data available")
+                                else:
+                                    print(f"🔍 [{eval_time}] ICT Swing: Evaluating | History: {len(strategy_history)} bars")
+                                
                                 swing_signals, swing_diag = self.ict_swing_strategy.evaluate(strategy_history, current_quote)
                                 self.ict_swing_state['last_diagnostics'] = swing_diag
-                                for swing_signal in swing_signals:
-                                    self._process_ict_swing_signal(swing_signal, spread_block, atr_block)
+                                
+                                status = swing_diag.get('status', 'unknown')
+                                reason = swing_diag.get('reason', 'no_reason')
+                                
+                                if swing_signals:
+                                    print(f"✅ [{eval_time}] ICT Swing: {len(swing_signals)} signal(s) generated | Status: {status}")
+                                    for swing_signal in swing_signals:
+                                        self._process_ict_swing_signal(swing_signal, spread_block, atr_block)
+                                else:
+                                    # Format reason for readability
+                                    reason_display = reason.replace('_', ' ').title() if reason else 'No signal conditions met'
+                                    print(f"⏸️ [{eval_time}] ICT Swing: No signals | Status: {status} | Reason: {reason_display}")
+                                    
+                                    # Show session alignment info if available
+                                    summary = swing_diag.get('summary', {})
+                                    if summary:
+                                        sessions = summary.get('sessions', {})
+                                        if sessions:
+                                            asian = sessions.get('asian', {})
+                                            london = sessions.get('london', {})
+                                            ny = sessions.get('new_york', {})
+                                            print(f"   └─ Asian: {asian.get('open', 'N/A')} | London: {london.get('open', 'N/A')} | NY: {ny.get('open', 'N/A')}")
+                                        
                             except Exception as e:
-                                print(f"⚠️ ICT Swing processing error: {e}")
+                                print(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing processing error: {e}")
 
                         if self.ict_atm_enabled and self.ict_atm_strategy and self._is_gold_symbol():
                             try:
+                                eval_time = datetime.now().strftime("%H:%M:%S")
+                                
+                                if strategy_history is None or strategy_history.empty:
+                                    print(f"🔍 [{eval_time}] ICT ATM: Evaluating | ⚠️ No history data available")
+                                else:
+                                    print(f"🔍 [{eval_time}] ICT ATM: Evaluating | History: {len(strategy_history)} bars")
+                                
                                 atm_signals, atm_diag = self.ict_atm_strategy.evaluate(strategy_history, current_quote)
                                 self.ict_atm_state['last_diagnostics'] = atm_diag
-                                for atm_signal in atm_signals:
-                                    self._process_ict_atm_signal(atm_signal, spread_block, atr_block)
+                                
+                                status = atm_diag.get('status', 'unknown')
+                                reason = atm_diag.get('reason', 'no_reason')
+                                
+                                if atm_signals:
+                                    print(f"✅ [{eval_time}] ICT ATM: {len(atm_signals)} signal(s) generated | Status: {status}")
+                                    for atm_signal in atm_signals:
+                                        self._process_ict_atm_signal(atm_signal, spread_block, atr_block)
+                                else:
+                                    # Format reason for readability
+                                    reason_display = reason.replace('_', ' ').title() if reason else 'No signal conditions met'
+                                    print(f"⏸️ [{eval_time}] ICT ATM: No signals | Status: {status} | Reason: {reason_display}")
+                                    
+                                    # Show detailed diagnostics if available
+                                    summary = atm_diag.get('summary', {})
+                                    if summary:
+                                        atr_current = summary.get('atr_current')
+                                        atr_avg = summary.get('atr_avg')
+                                        if atr_current is not None and atr_avg is not None:
+                                            atr_ratio = atr_current / atr_avg if atr_avg > 0 else 0
+                                            print(f"   └─ ATR Current: {atr_current:.2f} | ATR Avg: {atr_avg:.2f} | Ratio: {atr_ratio:.2f}x")
+                                        
                             except Exception as e:
-                                print(f"⚠️ ICT ATM processing error: {e}")
+                                print(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM processing error: {e}")
                         
                     else:
                         print("⚠️ Failed to fetch current quote")
@@ -1514,6 +1608,12 @@ class LiveDataStream:
             self.enable_high = True
             self.event_mode_enabled = False
             self.farmer_enabled = self._farmer_default_enabled
+        elif mode == 'NONE':
+            self.enable_low = False
+            self.enable_medium = False
+            self.enable_high = False
+            self.event_mode_enabled = False
+            self.farmer_enabled = False
         elif mode == 'FARMER_ONLY':
             self.enable_low = False
             self.enable_medium = False
@@ -1649,6 +1749,25 @@ class LiveDataStream:
         )
 
         if not can_trade:
+            # Diagnostic logging for why trade was blocked
+            block_reasons = []
+            if not self.autotrader:
+                block_reasons.append("No AutoTrader")
+            elif not self.autotrader.enabled:
+                block_reasons.append("AutoTrader disabled")
+            if not self.trading_enabled:
+                block_reasons.append("Trading disabled")
+            if spread_block:
+                block_reasons.append("Spread too wide")
+            if atr_block:
+                block_reasons.append("ATR too low")
+            if self.event_mode_enabled:
+                block_reasons.append("Event mode active")
+            if self._is_blackout_or_off_session():
+                block_reasons.append("Outside trading session")
+            
+            reason_str = " | ".join(block_reasons) if block_reasons else "Unknown reason"
+            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] NYUPIP: Signal generated but blocked | {reason_str}")
             return
 
         try:
@@ -1768,14 +1887,41 @@ class LiveDataStream:
             can_trade = False
 
         if not can_trade:
+            # Diagnostic logging for why trade was blocked
+            block_reasons = []
+            if not self.autotrader:
+                block_reasons.append("No AutoTrader")
+            elif not self.autotrader.enabled:
+                block_reasons.append("AutoTrader disabled")
+            if not self.trading_enabled:
+                block_reasons.append("Trading disabled")
+            if spread_block:
+                block_reasons.append("Spread too wide")
+            if atr_block:
+                block_reasons.append("ATR too low")
+            if self.event_mode_enabled:
+                block_reasons.append("Event mode active")
+            if self._is_blackout_or_off_session():
+                block_reasons.append("Outside trading session")
+            if engine_mode in {'NONE', 'FARMER_ONLY', 'LOW_ONLY', 'MEDIUM_ONLY', 'EVENT_ONLY'}:
+                block_reasons.append(f"Engine mode: {engine_mode}")
+            if not self.enable_high:
+                block_reasons.append("HIGH engine disabled")
+            
+            reason_str = " | ".join(block_reasons) if block_reasons else "Unknown reason"
+            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Signal generated but blocked | {reason_str}")
             return
 
         if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
-            print("⏸️ Halt new orders (daily cap) for ICT Swing")
+            print(f"⏸️ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Halt new orders (daily loss cap reached)")
             return
 
-        if self.campaign and not self.campaign.allow(self.symbol, signal.direction, 'HIGH'):
-            print("⛔ Campaign limit reached for ICT Swing")
+        # Use a distinct campaign bucket for ICT Swing so it doesn't compete with ATM
+        swing_bucket = 'HIGH_SWING'
+        if self.campaign and not self.campaign.allow(self.symbol, signal.direction, swing_bucket):
+            current_count = self.campaign.current_count(self.symbol, signal.direction, swing_bucket) if self.campaign else 0
+            max_count = self.campaign.max_per_level.get(swing_bucket, self.campaign.max_per_level.get('HIGH', 9)) if self.campaign else 9
+            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Campaign limit reached ({current_count}/{max_count} {swing_bucket} trades in window)")
             return
 
         try:
@@ -1829,7 +1975,7 @@ class LiveDataStream:
             except Exception as exc:
                 print(f"⚠️ Order manager ICT Swing error: {exc}")
         if self.campaign:
-            self.campaign.record(self.symbol, signal.direction, 'HIGH')
+            self.campaign.record(self.symbol, signal.direction, swing_bucket)
 
     def _process_ict_atm_signal(self, signal: ICTATMSignal, spread_block: bool, atr_block: bool):
         payload = signal.to_payload()
@@ -1897,14 +2043,41 @@ class LiveDataStream:
             can_trade = False
 
         if not can_trade:
+            # Diagnostic logging for why trade was blocked
+            block_reasons = []
+            if not self.autotrader:
+                block_reasons.append("No AutoTrader")
+            elif not self.autotrader.enabled:
+                block_reasons.append("AutoTrader disabled")
+            if not self.trading_enabled:
+                block_reasons.append("Trading disabled")
+            if spread_block:
+                block_reasons.append("Spread too wide")
+            if atr_block:
+                block_reasons.append("ATR too low")
+            if self.event_mode_enabled:
+                block_reasons.append("Event mode active")
+            if self._is_blackout_or_off_session():
+                block_reasons.append("Outside trading session")
+            if engine_mode in {'NONE', 'FARMER_ONLY', 'LOW_ONLY', 'MEDIUM_ONLY', 'EVENT_ONLY'}:
+                block_reasons.append(f"Engine mode: {engine_mode}")
+            if not self.enable_high:
+                block_reasons.append("HIGH engine disabled")
+            
+            reason_str = " | ".join(block_reasons) if block_reasons else "Unknown reason"
+            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Signal generated but blocked | {reason_str}")
             return
 
         if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
-            print("⏸️ Halt new orders (daily cap) for ICT ATM")
+            print(f"⏸️ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Halt new orders (daily loss cap reached)")
             return
 
-        if self.campaign and not self.campaign.allow(self.symbol, signal.direction, 'HIGH'):
-            print("⛔ Campaign limit reached for ICT ATM")
+        # Use a distinct campaign bucket for ICT ATM so it doesn't compete with Swing
+        atm_bucket = 'HIGH_ATM'
+        if self.campaign and not self.campaign.allow(self.symbol, signal.direction, atm_bucket):
+            current_count = self.campaign.current_count(self.symbol, signal.direction, atm_bucket) if self.campaign else 0
+            max_count = self.campaign.max_per_level.get(atm_bucket, self.campaign.max_per_level.get('HIGH', 9)) if self.campaign else 9
+            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Campaign limit reached ({current_count}/{max_count} {atm_bucket} trades in window)")
             return
 
         try:
@@ -1958,7 +2131,7 @@ class LiveDataStream:
             except Exception as exc:
                 print(f"⚠️ Order manager ICT ATM error: {exc}")
         if self.campaign:
-            self.campaign.record(self.symbol, signal.direction, 'HIGH')
+            self.campaign.record(self.symbol, signal.direction, atm_bucket)
 
 # Example usage
 if __name__ == "__main__":

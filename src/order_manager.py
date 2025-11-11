@@ -119,10 +119,35 @@ class OrderManager:
 		# Close detection for tickets we track but are not open anymore
 		for ticket, state in list(self.managed.items()):
 			if ticket not in open_tickets:
-				# closed externally; mark unknown reason
-				self.persistence.update_trade(ticket, {
-					'status': 'CLOSED'
-				})
+				# closed: try enrich with close price/time from MT5 deals history
+				close_price = None
+				close_time_iso = None
+				pnl = None
+				try:
+					deals = self.mt5.get_orders_history(count=200)
+					for d in (deals or [])[::-1]:  # newest first
+						pos_id = getattr(d, 'position_id', None)
+						if pos_id == ticket:
+							close_price = float(getattr(d, 'price', 0.0))
+							pnl = float(getattr(d, 'profit', 0.0))
+							try:
+								import datetime as _dt
+								ts = getattr(d, 'time', None)
+								if ts:
+									close_time_iso = _dt.datetime.fromtimestamp(ts).isoformat()
+							except Exception:
+								pass
+							break
+				except Exception:
+					pass
+				payload = {'status': 'CLOSED'}
+				if close_price is not None:
+					payload['close_price'] = close_price
+				if close_time_iso is not None:
+					payload['close_time'] = close_time_iso
+				if pnl is not None:
+					payload['pnl'] = pnl
+				self.persistence.update_trade(ticket, payload)
 				self.managed.pop(ticket, None)
 		# Apply rules for open positions
 		for p in positions:

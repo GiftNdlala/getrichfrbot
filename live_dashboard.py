@@ -19,6 +19,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from src.live_data_stream import LiveDataStream, LiveSignal
 from src.config import get_config
 from src.persistence import PersistenceManager
+from src.mt5_connector import MT5Connector
+from src.executor import AutoTrader
 
 app = Flask(__name__)
 
@@ -27,6 +29,12 @@ streams = {}
 current_signal_data = None
 signal_history = []
 persistence = PersistenceManager()
+# Auto-take-profit settings
+auto_take_profit = {
+    'enabled': False,
+    'threshold': 30.0  # Default threshold
+}
+auto_tp_lock = threading.Lock()
 
 def init_live_stream():
     """Initialize live data streams for configured symbols"""
@@ -421,6 +429,256 @@ def ict_atm_status():
     state = s.get_ict_atm_state()
     return jsonify({'status': 'success', 'symbol': sym, 'state': state})
 
+@app.route('/api/close_all_trades', methods=['POST'])
+def close_all_trades():
+    """Kill switch: Close all open trades/positions"""
+    try:
+        mt5_conn = MT5Connector()
+        if not mt5_conn.initialize():
+            return jsonify({'status': 'error', 'message': 'MT5 not initialized'}), 500
+        
+        positions = mt5_conn.get_positions()
+        if not positions:
+            return jsonify({'status': 'success', 'message': 'No open positions', 'closed': 0})
+        
+        closed_count = 0
+        failed_count = 0
+        errors = []
+        
+        for pos in positions:
+            try:
+                autotrader = AutoTrader(pos.symbol)
+                if autotrader.close_position(pos.ticket):
+                    closed_count += 1
+                else:
+                    failed_count += 1
+                    errors.append(f"Failed to close ticket {pos.ticket}")
+            except Exception as e:
+                failed_count += 1
+                errors.append(f"Error closing ticket {pos.ticket}: {str(e)}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Closed {closed_count} positions',
+            'closed': closed_count,
+            'failed': failed_count,
+            'errors': errors
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/close_profitable_trades', methods=['POST'])
+def close_profitable_trades():
+    """Kill switch: Close all open trades/positions with profits only (+)"""
+    try:
+        mt5_conn = MT5Connector()
+        if not mt5_conn.initialize():
+            return jsonify({'status': 'error', 'message': 'MT5 not initialized'}), 500
+        
+        positions = mt5_conn.get_positions()
+        if not positions:
+            return jsonify({'status': 'success', 'message': 'No open positions', 'closed': 0})
+        
+        # Filter only profitable positions (profit > 0)
+        profitable_positions = [pos for pos in positions if float(getattr(pos, 'profit', 0)) > 0]
+        
+        if not profitable_positions:
+            return jsonify({'status': 'success', 'message': 'No profitable positions', 'closed': 0})
+        
+        closed_count = 0
+        failed_count = 0
+        errors = []
+        
+        for pos in profitable_positions:
+            try:
+                autotrader = AutoTrader(pos.symbol)
+                if autotrader.close_position(pos.ticket):
+                    closed_count += 1
+                else:
+                    failed_count += 1
+                    errors.append(f"Failed to close ticket {pos.ticket}")
+            except Exception as e:
+                failed_count += 1
+                errors.append(f"Error closing ticket {pos.ticket}: {str(e)}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Closed {closed_count} profitable positions',
+            'closed': closed_count,
+            'failed': failed_count,
+            'errors': errors
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/close_losing_trades', methods=['POST'])
+def close_losing_trades():
+    """Kill switch: Close all open trades/positions with losses only (-)"""
+    try:
+        mt5_conn = MT5Connector()
+        if not mt5_conn.initialize():
+            return jsonify({'status': 'error', 'message': 'MT5 not initialized'}), 500
+        
+        positions = mt5_conn.get_positions()
+        if not positions:
+            return jsonify({'status': 'success', 'message': 'No open positions', 'closed': 0})
+        
+        # Filter only losing positions (profit < 0)
+        losing_positions = [pos for pos in positions if float(getattr(pos, 'profit', 0)) < 0]
+        
+        if not losing_positions:
+            return jsonify({'status': 'success', 'message': 'No losing positions', 'closed': 0})
+        
+        closed_count = 0
+        failed_count = 0
+        errors = []
+        
+        for pos in losing_positions:
+            try:
+                autotrader = AutoTrader(pos.symbol)
+                if autotrader.close_position(pos.ticket):
+                    closed_count += 1
+                else:
+                    failed_count += 1
+                    errors.append(f"Failed to close ticket {pos.ticket}")
+            except Exception as e:
+                failed_count += 1
+                errors.append(f"Error closing ticket {pos.ticket}: {str(e)}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Closed {closed_count} losing positions',
+            'closed': closed_count,
+            'failed': failed_count,
+            'errors': errors
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/total_profit', methods=['GET'])
+def get_total_profit():
+    """Get total unrealized profit from all open positions"""
+    try:
+        mt5_conn = MT5Connector()
+        if not mt5_conn.initialize():
+            return jsonify({'status': 'error', 'message': 'MT5 not initialized'}), 500
+        
+        positions = mt5_conn.get_positions()
+        if not positions:
+            return jsonify({
+                'status': 'success',
+                'total_profit': 0.0,
+                'position_count': 0,
+                'currency': 'USD'
+            })
+        
+        # Get account currency
+        try:
+            import MetaTrader5 as mt5
+            acc_info = mt5.account_info()
+            currency = getattr(acc_info, 'currency', 'USD') if acc_info else 'USD'
+        except Exception:
+            currency = 'USD'
+        
+        # Sum all unrealized profits
+        total_profit = sum(float(getattr(pos, 'profit', 0)) for pos in positions)
+        
+        return jsonify({
+            'status': 'success',
+            'total_profit': round(total_profit, 2),
+            'position_count': len(positions),
+            'currency': currency
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/auto_take_profit', methods=['GET'])
+def get_auto_take_profit():
+    """Get auto-take-profit settings"""
+    with auto_tp_lock:
+        return jsonify({
+            'status': 'success',
+            'enabled': auto_take_profit['enabled'],
+            'threshold': auto_take_profit['threshold']
+        })
+
+@app.route('/api/auto_take_profit', methods=['POST'])
+def set_auto_take_profit():
+    """Set auto-take-profit settings"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        enabled = bool(payload.get('enabled', False))
+        threshold = float(payload.get('threshold', 30.0))
+        
+        if threshold < 0:
+            return jsonify({'status': 'error', 'message': 'Threshold must be positive'}), 400
+        
+        with auto_tp_lock:
+            auto_take_profit['enabled'] = enabled
+            auto_take_profit['threshold'] = threshold
+        
+        return jsonify({
+            'status': 'success',
+            'enabled': enabled,
+            'threshold': threshold,
+            'message': f'Auto-take-profit {"enabled" if enabled else "disabled"} at {threshold} threshold'
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+def monitor_auto_take_profit():
+    """Background thread that monitors total profit and closes all positions when threshold is reached"""
+    while True:
+        try:
+            with auto_tp_lock:
+                enabled = auto_take_profit['enabled']
+                threshold = auto_take_profit['threshold']
+            
+            if enabled:
+                try:
+                    mt5_conn = MT5Connector()
+                    if mt5_conn.initialize():
+                        positions = mt5_conn.get_positions()
+                        if positions:
+                            total_profit = sum(float(getattr(pos, 'profit', 0)) for pos in positions)
+                            
+                            if total_profit >= threshold:
+                                try:
+                                    import MetaTrader5 as mt5
+                                    acc_info = mt5.account_info()
+                                    currency = getattr(acc_info, 'currency', '') if acc_info else ''
+                                except Exception:
+                                    currency = ''
+                                
+                                print(f"🎯 Auto-take-profit triggered! Total profit: {total_profit:.2f}{currency} >= {threshold:.2f}{currency}")
+                                # Close all positions
+                                closed_count = 0
+                                failed_count = 0
+                                for pos in positions:
+                                    try:
+                                        autotrader = AutoTrader(pos.symbol)
+                                        if autotrader.close_position(pos.ticket):
+                                            closed_count += 1
+                                        else:
+                                            failed_count += 1
+                                    except Exception as e:
+                                        failed_count += 1
+                                        print(f"⚠️ Error closing position {pos.ticket}: {e}")
+                                
+                                print(f"✅ Auto-take-profit closed {closed_count} positions (failed: {failed_count})")
+                                
+                                # Disable auto-take-profit after triggering
+                                with auto_tp_lock:
+                                    auto_take_profit['enabled'] = False
+                except Exception as e:
+                    print(f"⚠️ Error in auto-take-profit monitor: {e}")
+            
+            # Check every 5 seconds
+            time.sleep(5)
+        except Exception as e:
+            print(f"⚠️ Error in auto-take-profit monitor thread: {e}")
+            time.sleep(5)
+
 def ensure_professional_template():
     """Ensure the professional template is available"""
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
@@ -447,6 +705,12 @@ if __name__ == '__main__':
     # Initialize live stream with REAL market data
     print("📡 Initializing live data stream with REAL market data...")
     init_live_stream()
+    
+    # Start auto-take-profit monitoring thread
+    print("💰 Starting auto-take-profit monitor...")
+    monitor_thread = threading.Thread(target=monitor_auto_take_profit, daemon=True)
+    monitor_thread.start()
+    print("✅ Auto-take-profit monitor started")
     
     # Start Flask app
     print("🌐 Starting professional dashboard...")
