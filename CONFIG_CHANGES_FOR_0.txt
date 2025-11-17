@@ -1,0 +1,191 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                   CONFIG CHANGES NEEDED FOR $10 ACCOUNT                        ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+SUMMARY: The bot ALREADY supports micro accounts! Just need 8 config changes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CHANGE #1: Risk Per Trade
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Location: config.json → risk → risk_percent_per_trade
+  
+  BEFORE:  "risk_percent_per_trade": 0.25
+  AFTER:   "risk_percent_per_trade": 0.1
+  
+  Impact: Each losing trade loses $0.01 instead of $0.025
+
+
+CHANGE #2: Daily Soft Stop Loss
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Location: config.json → execution → loss_minimizer → soft_loss_dollars
+  
+  BEFORE:  "soft_loss_dollars": 3.0
+  AFTER:   "soft_loss_dollars": 1.0
+  
+  Impact: Bot STOPS TRADING after -$1 loss (10% of account)
+
+
+CHANGE #3: Daily Hard Stop Loss
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Location: config.json → execution → loss_minimizer → max_loss_dollars
+  
+  BEFORE:  "max_loss_dollars": 11.0
+  AFTER:   "max_loss_dollars": 2.0
+  
+  Impact: Bot FORCE CLOSES all positions after -$2 loss (20% of account)
+  ⚠️  Critical: 11.0 would BLOW UP the account!
+
+
+CHANGE #4-6: Campaign Trade Limits
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Location: config.json → execution → campaign_max_trades
+  
+  BEFORE (Original):          AFTER (For $10):
+  "LOW": 6                    "LOW": 2
+  "MEDIUM": 6                 "MEDIUM": 2
+  "HIGH": 30                  "HIGH": 5
+  "HIGH_SWING": 30            "HIGH_SWING": 5
+  "HIGH_ATM": 30              "HIGH_ATM": 5
+  
+  Impact: Prevents cascading losses from too many quick trades
+
+
+CHANGE #7: Farmer Trades Per Cycle
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Location: config.json → execution → farmer → trades_per_cycle
+  
+  BEFORE:  "trades_per_cycle": 3
+  AFTER:   "trades_per_cycle": 1
+  
+  Impact: Only 1 micro scalp per cycle instead of 3
+
+
+CHANGE #8: Farmer Cycle Time
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Location: config.json → execution → farmer → cycle_seconds
+  
+  BEFORE:  "cycle_seconds": 30
+  AFTER:   "cycle_seconds": 60
+  
+  Impact: More time between scalp trades (safer for small account)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OPTIONAL CHANGE: Daily Loss Limit (Advanced)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Location: config.json → risk → symbol_caps → XAUUSDm
+  
+  BEFORE:
+  "daily_loss_limit_pct": 90.0
+  "max_open_risk_pct": 5.0
+  
+  AFTER (recommended):
+  "daily_loss_limit_pct": 10.0
+  "max_open_risk_pct": 2.0
+  
+  Impact: Extra safety layer (10% max daily loss)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUICK UPDATE OPTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Option A: AUTOMATED (Recommended)
+  $ python setup_micro_account.py
+  
+  This script:
+  ✅ Backs up your config.json
+  ✅ Updates all 8 settings automatically
+  ✅ Validates the changes
+  ✅ Tells you what changed
+
+
+Option B: MANUAL
+  1. Open config.json in your editor
+  2. Find each location listed above
+  3. Replace the BEFORE values with AFTER values
+  4. Save the file
+  5. Test with bot startup
+
+
+Option C: TEXT REPLACE
+  Use find/replace in your editor:
+  - Find: "risk_percent_per_trade": 0.25        Replace: "risk_percent_per_trade": 0.1
+  - Find: "soft_loss_dollars": 3.0                Replace: "soft_loss_dollars": 1.0
+  - Find: "max_loss_dollars": 11.0                Replace: "max_loss_dollars": 2.0
+  - Find: "trades_per_cycle": 3                   Replace: "trades_per_cycle": 1
+  - Find: "cycle_seconds": 30                     Replace: "cycle_seconds": 60
+  - Replace ALL "HIGH": 30 with "HIGH": 5
+  - Replace ALL "MEDIUM": 6 with "MEDIUM": 2
+  - Replace ALL "LOW": 6 with "LOW": 2
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT WILL HAPPEN AFTER UPDATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+With these settings:
+
+Risk Per Trade:        $0.01 per losing trade
+Lot Size:             0.01 - 0.02 micro lots
+Max Position Value:   $0.10 - $0.20
+Stop Loss at:         -$1.00 (10% drawdown)
+Close All at:         -$2.00 (20% drawdown)
+Max Trades/5min:      2-5 depending on level
+Farmer Scalps:        1 per minute
+
+Survival Rate:        ✅ Can handle 10+ consecutive losses
+Account Growth:       📈 Slow but sustainable
+Blowup Risk:          ❌ Eliminated
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+VERIFICATION STEPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After making changes:
+
+1. Check syntax:
+   $ python3 -m json.tool config.json > /dev/null && echo "✅ Valid JSON"
+
+2. Check risk setting:
+   $ python3 -c "import json; print(json.load(open('config.json'))['risk']['risk_percent_per_trade'])"
+   Should print: 0.1
+
+3. Check loss limits:
+   $ python3 -c "import json; c=json.load(open('config.json')); print(f\"Soft: ${c['execution']['loss_minimizer']['soft_loss_dollars']}\"); print(f\"Max: ${c['execution']['loss_minimizer']['max_loss_dollars']}\")"
+   Should print: Soft: $1.0 and Max: $2.0
+
+4. Run bot with demo mode first:
+   $ python start_live_signals.py
+   Watch logs for lot sizing and risk calculations
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BACKUP FIRST!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before making any changes:
+  $ cp config.json config.json.backup
+
+If something goes wrong:
+  $ cp config.json.backup config.json
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUESTIONS?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+See: MICRO_ACCOUNT_SETUP_$10.md for detailed explanations
+
+═════════════════════════════════════════════════════════════════════════════════
+Last Updated: November 17, 2025
+Ready for: $10 USD micro accounts on Exness XAUUSDm
+═════════════════════════════════════════════════════════════════════════════════
