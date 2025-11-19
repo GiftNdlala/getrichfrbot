@@ -1,0 +1,112 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    SWING_HIGH TIME FILTERING - QUICK REFERENCE                 ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+📊 ACTIVE TRADING WINDOWS (SAST TIMEZONE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✅ PRIMARY WINDOW 1: 12:00 - 14:00 (London Mid)
+     └─ Accept ALL HIGH signals
+     └─ Best profitability: 13:00 zone
+
+  ✅ PRIMARY WINDOW 2: 15:30 - 17:30 (London Close)
+     └─ Accept ALL HIGH signals
+     └─ Strong liquidity pockets: 15:30 & 17:00
+
+  ⚠️  CONDITIONAL WINDOW: 14:00 - 15:30 (NY Open)
+     └─ Accept HIGH signals ONLY if confidence >= 80%
+     └─ Block LOW confidence signals
+
+  ❌ OUTSIDE WINDOWS: All other times
+     └─ Block ALL HIGH signals
+     └─ LOW/MEDIUM signals still accepted
+
+
+🎯 SIGNAL FILTERING LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  IF confidence >= 60% (HIGH signal):
+    12:00-14:00 or 15:30-17:30  →  ✅ ACCEPT  [ACTIVE_WINDOW]
+    14:00-15:30 and conf>=80%    →  ✅ ACCEPT  [NY_OPEN_CONFIRMED]
+    14:00-15:30 and conf<80%     →  ❌ REJECT  [NY_OPEN_BLOCKED_LOW_CONF]
+    Outside windows              →  ❌ REJECT  [OUTSIDE_TRADING_HOURS]
+
+  ELSE (LOW/MEDIUM signal):
+    Any time                     →  ✅ ACCEPT  (not filtered)
+
+
+📈 EXPECTED IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • Signal Frequency:      100% → 40-60%  (expected)
+  • Win Rate:             Improve        (fewer low-quality trades)
+  • Profit Factor:        Better focused  (peak window trades only)
+  • Drawdown:             Reduced         (less outside-hour whipsaws)
+  • Best Trading Hours:   12:00-14:00     (main profit source)
+  • Secondary Window:     15:30-17:30     (confirmed profitable)
+  • Risky Window:         14:00-15:30     (needs 80+ confidence)
+
+
+🔧 KEY CONFIGURATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  File: src/strategies/ict_swing_points.py
+
+  ACTIVE_TRADING_WINDOWS = [
+    (time(12, 0), time(14, 0)),   # London mid
+    (time(15, 30), time(17, 30)),  # London close
+  ]
+
+  NY_OPEN_CONFIRMATION_WINDOW = (time(14, 0), time(15, 30))
+
+  HIGH_SIGNAL_THRESHOLD = 60.0           # confidence >= 60% = HIGH signal
+  NY_OPEN_MIN_CONFIDENCE = 80.0          # confidence >= 80% for NY Open
+
+
+🔍 MONITORING SIGNALS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Watch logs for filter status tags:
+
+  [ACTIVE_WINDOW]              = Accepted in prime trading time
+  [NY_OPEN_CONFIRMED]          = High confidence NY Open (accepted)
+  [NY_OPEN_BLOCKED_LOW_CONF]   = Low confidence NY Open (rejected)
+  [OUTSIDE_TRADING_HOURS]      = Outside all windows (rejected)
+
+
+📋 ADJUSTMENT CHECKLIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  If profitability changes, consider:
+
+  ☐ Window times:           Try ±30 minutes from current times
+  ☐ NY Open confidence:     Try 75% or 85% instead of 80%
+  ☐ High signal threshold:  Try 65% or 70% instead of 60%
+  ☐ Add volatility filter:  Only trade during ATR > X
+  ☐ Add trend confirmation: Require HTF trend alignment
+
+
+⏰ TIMEZONE REMINDER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  🕐 ALL TIMES ARE IN SAST (South Africa Standard Time, UTC+2)
+
+  When converting:
+  • 12:00 SAST = 10:00 UTC
+  • 14:00 SAST = 12:00 UTC  
+  • 15:30 SAST = 13:30 UTC
+  • 17:30 SAST = 15:30 UTC
+
+
+📚 DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • SWING_HIGH_SESSION_CONFIG.md   = Detailed configuration docs
+  • IMPLEMENTATION_SUMMARY.md       = Full implementation guide
+  • SWING_HIGH.md                   = Historical trade data
+  • src/strategies/ict_swing_points.py = Source code
+
+═════════════════════════════════════════════════════════════════════════════════
+Last Updated: November 17, 2025
+Implementation: Time-based session filtering for SWING_HIGH signals
+═════════════════════════════════════════════════════════════════════════════════

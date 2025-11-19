@@ -78,12 +78,23 @@ class ICTSwingSignal:
 class ICTSwingPointsStrategy:
     """Implements ICT Swing Points session logic for XAUUSD."""
 
+    # Trading sessions - all sessions defined for reference
     SESSIONS: Dict[str, Tuple[time, time]] = {
         "ASIA": (time(0, 0), time(6, 59)),
         "LONDON": (time(7, 0), time(11, 59)),
         "NEW_YORK": (time(12, 0), time(15, 59)),
         "LONDON_CLOSE": (time(15, 30), time(17, 30)),
     }
+    
+    # Active trading windows for HIGH signal profitability (SAST timezone)
+    # Based on backtest results: 12:00-14:00 and 15:30-17:30 show best performance
+    ACTIVE_TRADING_WINDOWS = [
+        (time(12, 0), time(14, 0)),   # London mid (13:00 profitable zone)
+        (time(15, 30), time(17, 30)),  # London close (15:30 & 17:00 pockets)
+    ]
+    
+    # NY Open window (14:00-15:30) requires extra confirmation for HIGH signals
+    NY_OPEN_CONFIRMATION_WINDOW = (time(14, 0), time(15, 30))
 
     def __init__(
         self,
@@ -102,6 +113,20 @@ class ICTSwingPointsStrategy:
             "summary": {},
             "signals": [],
         }
+
+    def _is_active_trading_time(self, current_local: pd.Timestamp) -> bool:
+        """Check if current time falls within high-probability trading windows (12:00-14:00 and 15:30-17:30 SAST)."""
+        current_time = current_local.time()
+        for start, end in self.ACTIVE_TRADING_WINDOWS:
+            if start <= current_time <= end:
+                return True
+        return False
+    
+    def _is_ny_open_time(self, current_local: pd.Timestamp) -> bool:
+        """Check if current time is in NY Open window (14:00-15:30) that requires extra confirmation."""
+        current_time = current_local.time()
+        start, end = self.NY_OPEN_CONFIRMATION_WINDOW
+        return start <= current_time <= end
 
     # ------------------------------------------------------------------
     # Public API
@@ -178,17 +203,48 @@ class ICTSwingPointsStrategy:
             self._london_close_setups(sessions, today_slice, current_local, current_quote)
         )
 
-        if session_signals:
+        # Apply time/session filters to HIGH level signals
+        # Only trade HIGH signals during active windows: 12:00-14:00 and 15:30-17:30 SAST
+        # NY Open (14:00-15:30) requires confidence >= 80 for HIGH signals
+        filtered_signals: List[ICTSwingSignal] = []
+        for sig in session_signals:
+            # Check if this is a HIGH confidence signal (assumed by 0-100 scale in _build_signal)
+            is_high_signal = sig.confidence >= 60.0  # HIGH level signals typically have confidence > 60
+            
+            if is_high_signal:
+                # HIGH level signal - apply strict time filtering
+                if self._is_active_trading_time(current_local):
+                    # Active trading window - accept signal
+                    filtered_signals.append(sig)
+                    sig.notes += " [ACTIVE_WINDOW]" if "[" not in sig.notes else ""
+                elif self._is_ny_open_time(current_local):
+                    # NY Open window - only accept if confidence >= 80 (requires HTF confirmation)
+                    if sig.confidence >= 80.0:
+                        filtered_signals.append(sig)
+                        sig.notes += " [NY_OPEN_CONFIRMED]" if "[" not in sig.notes else ""
+                    else:
+                        sig.notes += " [NY_OPEN_BLOCKED_LOW_CONF]" if "[" not in sig.notes else ""
+                else:
+                    # Outside trading windows - reject HIGH signals
+                    sig.notes += " [OUTSIDE_TRADING_HOURS]" if "[" not in sig.notes else ""
+            else:
+                # LOW/MEDIUM signals - pass through without time filtering
+                filtered_signals.append(sig)
+
+        if filtered_signals:
             diagnostics.update({
                 "status": "signal",
                 "reason": "session_pattern_matched",
-                "signals": [sig.to_payload() for sig in session_signals],
+                "signals": [sig.to_payload() for sig in filtered_signals],
             })
-            signals.extend(session_signals)
+            signals.extend(filtered_signals)
         else:
+            reason = "no_session_alignment"
+            if session_signals and all(s.confidence >= 60.0 for s in session_signals):
+                reason = "outside_active_trading_hours"
             diagnostics.update({
                 "status": "hold",
-                "reason": "no_session_alignment",
+                "reason": reason,
                 "signals": [],
             })
 
