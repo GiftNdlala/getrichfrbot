@@ -20,8 +20,8 @@
 
   "sessions": {
     "timezone": "Africa/Johannesburg",
-    "trade_start": "08:00",
-    "trade_end": "03:00",
+    "trade_start": 13:00",
+    "trade_end": "17:00",
     "days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
   },
   "blackout": {
