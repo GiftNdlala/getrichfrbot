@@ -2,8 +2,8 @@
   "broker": {
     "name": "Exness",
     "platform": "MT5",
-    "server": "Exness-MT5Trial9",
-    "login": 211939001,
+    "server": "Exness-MT5Real30",
+    "login": 223112614,
     "symbol": "XAUUSDm"  
   },
   "risk": {
@@ -23,7 +23,8 @@
     "trade_start": 13:00",
     "trade_end": "17:00",
     "days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
-  },
+},
+
   "blackout": {
     "events": ["NFP", "CPI", "FOMC"],
     "buffer_minutes": 30,
