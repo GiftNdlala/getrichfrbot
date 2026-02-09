@@ -264,18 +264,32 @@ class SignalGenerator:
         
         if method == 'majority':
             # Simple majority vote
-            combined_signal = signal_data.sum(axis=1)
+            vote_sum = signal_data.sum(axis=1)
+            positive_votes = (signal_data > 0).sum(axis=1)
+            negative_votes = (signal_data < 0).sum(axis=1)
+            total_votes = len(self.signal_columns)
             data = data.copy()
+            data.loc[:, 'signal_vote_sum'] = vote_sum
+            data.loc[:, 'signal_pos_votes'] = positive_votes
+            data.loc[:, 'signal_neg_votes'] = negative_votes
+            data.loc[:, 'signal_total_votes'] = total_votes
             data.loc[:, 'signal'] = np.where(
-                combined_signal > 0, 1,
-                np.where(combined_signal < 0, -1, 0)
+                vote_sum > 0, 1,
+                np.where(vote_sum < 0, -1, 0)
             )
         
         elif method == 'weighted':
             # Weighted average (you can adjust weights)
             weights = np.ones(len(self.signal_columns))
             weighted_sum = (signal_data * weights).sum(axis=1)
+            positive_votes = (signal_data > 0).sum(axis=1)
+            negative_votes = (signal_data < 0).sum(axis=1)
+            total_votes = len(self.signal_columns)
             data = data.copy()
+            data.loc[:, 'signal_vote_sum'] = weighted_sum
+            data.loc[:, 'signal_pos_votes'] = positive_votes
+            data.loc[:, 'signal_neg_votes'] = negative_votes
+            data.loc[:, 'signal_total_votes'] = total_votes
             data.loc[:, 'signal'] = np.where(
                 weighted_sum > 0.5, 1,
                 np.where(weighted_sum < -0.5, -1, 0)
@@ -288,6 +302,11 @@ class SignalGenerator:
             total_signals = len(self.signal_columns)
             
             data = data.copy()
+            # vote_sum is only meaningful for majority/weighted, but keep the columns consistent
+            data.loc[:, 'signal_vote_sum'] = signal_data.sum(axis=1)
+            data.loc[:, 'signal_pos_votes'] = positive_signals
+            data.loc[:, 'signal_neg_votes'] = negative_signals
+            data.loc[:, 'signal_total_votes'] = total_signals
             data.loc[:, 'signal'] = np.where(
                 positive_signals == total_signals, 1,
                 np.where(negative_signals == total_signals, -1, 0)
@@ -296,7 +315,14 @@ class SignalGenerator:
         else:
             print(f"Unknown method: {method}. Using majority vote.")
             combined_signal = signal_data.sum(axis=1)
+            positive_votes = (signal_data > 0).sum(axis=1)
+            negative_votes = (signal_data < 0).sum(axis=1)
+            total_votes = len(self.signal_columns)
             data = data.copy()
+            data.loc[:, 'signal_vote_sum'] = combined_signal
+            data.loc[:, 'signal_pos_votes'] = positive_votes
+            data.loc[:, 'signal_neg_votes'] = negative_votes
+            data.loc[:, 'signal_total_votes'] = total_votes
             data.loc[:, 'signal'] = np.where(
                 combined_signal > 0, 1,
                 np.where(combined_signal < 0, -1, 0)

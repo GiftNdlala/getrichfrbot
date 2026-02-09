@@ -106,6 +106,13 @@ class LiveSignal:
     potential_profit_tp1: float
     potential_profit_tp2: float
     potential_profit_tp3: float
+    
+    # Signal ensemble quality metrics (from SignalGenerator)
+    signal_strength: float = 0.0
+    signal_vote_sum: float = 0.0
+    signal_pos_votes: int = 0
+    signal_neg_votes: int = 0
+    signal_total_votes: int = 0
 
 class LiveDataStream:
     """
@@ -1004,6 +1011,13 @@ class LiveDataStream:
         # Generate signal using signal generator
         signal_data = self.signal_generator.generate_all_signals(self.historical_data.tail(50))
         current_signal = signal_data['signal'].iloc[-1] if 'signal' in signal_data.columns else 0
+        # Ensemble quality metrics (optional, but very useful for gating HIGH/MED to reduce chop)
+        last_row = signal_data.iloc[-1] if signal_data is not None and not signal_data.empty else None
+        sig_strength = float(last_row.get('signal_strength', 0.0)) if last_row is not None else 0.0
+        vote_sum = float(last_row.get('signal_vote_sum', 0.0)) if last_row is not None else 0.0
+        pos_votes = int(last_row.get('signal_pos_votes', 0)) if last_row is not None else 0
+        neg_votes = int(last_row.get('signal_neg_votes', 0)) if last_row is not None else 0
+        total_votes = int(last_row.get('signal_total_votes', 0)) if last_row is not None else 0
         if off:
             current_signal = 0
         
@@ -1064,7 +1078,12 @@ class LiveDataStream:
             risk_amount_dollars=risk_mgmt['risk_amount_dollars'],
             potential_profit_tp1=risk_mgmt['potential_profit_tp1'],
             potential_profit_tp2=risk_mgmt['potential_profit_tp2'],
-            potential_profit_tp3=risk_mgmt['potential_profit_tp3']
+            potential_profit_tp3=risk_mgmt['potential_profit_tp3'],
+            signal_strength=sig_strength,
+            signal_vote_sum=vote_sum,
+            signal_pos_votes=pos_votes,
+            signal_neg_votes=neg_votes,
+            signal_total_votes=total_votes,
         )
     
     def _calculate_confidence(self, latest_data: pd.Series, signal: int) -> float:
@@ -1256,6 +1275,55 @@ class LiveDataStream:
                                 elif level == 'HIGH' and not self.enable_high:
                                     print("⏸️ Engine gated: HIGH disabled")
                                 else:
+                                    # Additional quality gates (configurable) for HIGH/MEDIUM to reduce chop losses.
+                                    # These are designed to trade less, but cleaner.
+                                    try:
+                                        qcfg = (self.config.get('filters', {}) or {}).get('quality_gates', {}) or {}
+                                        enable_qg = bool(qcfg.get('enabled', True))
+                                    except Exception:
+                                        enable_qg = True
+                                        qcfg = {}
+
+                                    if enable_qg and level in {'HIGH', 'MEDIUM'}:
+                                        try:
+                                            # Defaults: require at least 3-4 agreeing signals out of 7 total (43-57% consensus)
+                                            # This balances quality vs. opportunity - too strict blocks good trades, too loose allows chop
+                                            min_strength = float(qcfg.get(f"min_signal_strength_{level.lower()}", 3 if level == 'HIGH' else 2))
+                                            min_vote_margin = float(qcfg.get(f"min_vote_margin_{level.lower()}", 2 if level == 'HIGH' else 1))
+                                            require_sma200 = bool(qcfg.get('require_sma200_trend', True))
+
+                                            # Ensemble vote margin: how strong the majority is
+                                            vote_margin = abs(float(getattr(live_signal, 'signal_vote_sum', 0.0)))
+                                            # Use agreeing votes (pos_votes for BUY, neg_votes for SELL) instead of total signal_strength
+                                            pos_votes = int(getattr(live_signal, 'signal_pos_votes', 0))
+                                            neg_votes = int(getattr(live_signal, 'signal_neg_votes', 0))
+                                            agreeing_votes = pos_votes if side == 1 else neg_votes
+
+                                            if agreeing_votes < min_strength:
+                                                print(f"⛔ Quality gate: {level} blocked (agreeing_votes {agreeing_votes} < {min_strength}, pos={pos_votes} neg={neg_votes})")
+                                                continue
+                                            if vote_margin < min_vote_margin:
+                                                print(f"⛔ Quality gate: {level} blocked (vote_margin {vote_margin:.1f} < {min_vote_margin})")
+                                                continue
+
+                                            # Higher-timeframe trend alignment using SMA_200 if available
+                                            if require_sma200:
+                                                try:
+                                                    sma200 = float(latest_data.get('SMA_200', float('nan')))
+                                                    price = float(latest_data.get('Close', live_signal.current_price))
+                                                    if not np.isnan(sma200):
+                                                        if side == 1 and price < sma200:
+                                                            print(f"⛔ Trend gate: {level} BUY blocked (price {price:.2f} < SMA_200 {sma200:.2f})")
+                                                            continue
+                                                        if side == -1 and price > sma200:
+                                                            print(f"⛔ Trend gate: {level} SELL blocked (price {price:.2f} > SMA_200 {sma200:.2f})")
+                                                            continue
+                                                except Exception:
+                                                    # If SMA_200 not available, don't block; avoid breaking live runs
+                                                    pass
+                                        except Exception as e:
+                                            print(f"⚠️ Quality gate error (ignored): {e}")
+
                                     # campaign check
                                     if self.campaign and not self.campaign.allow(self.symbol, side, level):
                                         print(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
@@ -1317,10 +1385,10 @@ class LiveDataStream:
                                             # Send tiered partials first
                                             for tier_name, pips in tiers:
                                                 if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                                    send_one(tier_name, pips, engine="SWING_HIGH")
+                                                    send_one(tier_name, pips, engine="INTRADAY_HIGH")
                                             # Remaining up to campaign limit use base TP
                                             if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                                send_one(None, None, engine="SWING_HIGH")
+                                                send_one(None, None, engine="INTRADAY_HIGH")
                                         else:
                                             # LOW/MEDIUM use absolute TP we computed
                                             engine_name = "INTRADAY_LOW" if level=="LOW" else ("INTRADAY_MED" if level=="MEDIUM" else "INTRADAY")

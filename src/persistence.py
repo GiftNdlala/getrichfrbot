@@ -73,6 +73,7 @@ class PersistenceManager:
 	def _migrate_db(self):
 		"""Add new lifecycle columns if missing"""
 		with sqlite3.connect(self.db_path) as conn:
+			# ---- trades table migrations ----
 			existing_cols = {}
 			for row in conn.execute("PRAGMA table_info(trades)").fetchall():
 				existing_cols[row[1]] = True
@@ -95,6 +96,24 @@ class PersistenceManager:
 						conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
 					except Exception:
 						pass
+
+			# ---- signals table migrations (quality metrics) ----
+			existing_signal_cols = {}
+			for row in conn.execute("PRAGMA table_info(signals)").fetchall():
+				existing_signal_cols[row[1]] = True
+			signal_columns_to_add = {
+				'signal_strength': 'REAL',
+				'signal_vote_sum': 'REAL',
+				'signal_pos_votes': 'INTEGER',
+				'signal_neg_votes': 'INTEGER',
+				'signal_total_votes': 'INTEGER',
+			}
+			for col, col_type in signal_columns_to_add.items():
+				if col not in existing_signal_cols:
+					try:
+						conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}")
+					except Exception:
+						pass
 			conn.commit()
 
 	def save_signal(self, data: Dict[str, Any]) -> None:
@@ -104,7 +123,8 @@ class PersistenceManager:
 				'timestamp','symbol','current_price','signal','signal_type','confidence','rsi','macd','macd_signal',
 				'sma_20','sma_50','price_change','price_change_pct','alert_level','alert_color','target_pips','success_rate',
 				'entry_price','stop_loss','take_profit_1','take_profit_2','take_profit_3','risk_reward_ratio','atr_value',
-				'position_size_percent','risk_amount_dollars','potential_profit_tp1','potential_profit_tp2','potential_profit_tp3'
+				'position_size_percent','risk_amount_dollars','potential_profit_tp1','potential_profit_tp2','potential_profit_tp3',
+				'signal_strength','signal_vote_sum','signal_pos_votes','signal_neg_votes','signal_total_votes'
 			]
 			placeholders = ','.join(['?']*len(columns))
 			values = [data.get(col) for col in columns]
