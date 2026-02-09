@@ -13,8 +13,17 @@
     "tp_atr_multipliers": [0.3, 0.6, 1.0],
     "move_sl_to_be_after_tp1": true,
     "symbol_caps": {
-      "XAUUSDm": { "daily_loss_limit_pct": 500.9, "max_open_risk_pct": 5.0 },
-      "US30m": { "daily_loss_limit_pct": 30.0, "max_open_risk_pct": 6.0 }
+      "XAUUSDm": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 5.0 },
+      "US30m": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 6.0 }
+    },
+    "progressive_defense": {
+      "enabled": true,
+      "loss_tiers": [
+        {"realized_loss_pct": 0, "position_size_mult": 1.0, "label": "Normal"},
+        {"realized_loss_pct": 2, "position_size_mult": 0.5, "label": "50% size after -2%"},
+        {"realized_loss_pct": 3, "position_size_mult": 0.25, "label": "25% size after -3%"},
+        {"realized_loss_pct": 4, "position_size_mult": 0.0, "label": "HALT after -4%"}
+      ]
     }
   },
 
@@ -31,10 +40,13 @@
     "source": "manual"
   },
   "filters": {
-    "max_spread_points": 400,
+    "max_spread_points": 10,
+    "spread_spike_multiplier": 2.0,
     "min_tick_volume_ratio": 0.5,
     "consolidation_max_range_atr": 0.4,
     "min_atr_pips": 0,
+    "chop_detector_enabled": true,
+    "chop_range_atr_ratio": 0.6,
     "quality_gates": {
       "enabled": true,
       "require_sma200_trend": true,
@@ -43,6 +55,12 @@
       "min_signal_strength_medium": 2,
       "min_vote_margin_medium": 1
     }
+  },
+  "news": {
+    "enabled": true,
+    "pre_blackout_minutes": 30,
+    "post_blackout_minutes": 15,
+    "strict_blackout_for_high": true
   },
   "data_feed": {
     "primary": "MT5",

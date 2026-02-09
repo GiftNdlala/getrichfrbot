@@ -1,11 +1,13 @@
 from collections import deque, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 
 from .config import get_config
 from .persistence import PersistenceManager
 from .executor import AutoTrader
+from .microstructure import MicrostructureGate, SpreadAnalyzer, ChopDetector
+from .news_calendar import NewsGate, get_default_calendar
 try:
 	from .mt5_connector import MT5Connector
 except Exception:
@@ -78,7 +80,7 @@ class OrderManager:
 		# Per-symbol caps
 		cfg = get_config()
 		caps = cfg.get('risk', {}).get('symbol_caps', {})
-		self.daily_loss_limit_pct = float(caps.get(symbol, {}).get('daily_loss_limit_pct', 3.0))
+		self.daily_loss_limit_pct = float(caps.get(symbol, {}).get('daily_loss_limit_pct', 5.0))
 		self.max_open_risk_pct = float(caps.get(symbol, {}).get('max_open_risk_pct', 5.0))
 		# Loss minimizer
 		lm = cfg.get('execution', {}).get('loss_minimizer', {})
@@ -88,6 +90,29 @@ class OrderManager:
 		self.lm_retrace_points = float(lm.get('retrace_points', 10.0))
 		self.lm_window_seconds = int(lm.get('improvement_window_seconds', 20))
 		self._minimize_state: Dict[int, Dict] = {}
+		
+		# ===== PROFESSOR'S FIXES =====
+		# Microstructure gates (spread, chop)
+		self.microstructure_gate = MicrostructureGate(symbol=symbol)
+		
+		# News calendar blackout
+		self.news_gate = NewsGate(calendar=get_default_calendar())
+		news_cfg = cfg.get('news', {})
+		self.news_gate.enabled = bool(news_cfg.get('enabled', True))
+		self.news_gate.calendar.pre_buffer_minutes = int(news_cfg.get('pre_blackout_minutes', 30))
+		self.news_gate.calendar.post_buffer_minutes = int(news_cfg.get('post_blackout_minutes', 15))
+		
+		# Progressive defense (reduce size after consecutive losses)
+		pd_cfg = cfg.get('risk', {}).get('progressive_defense', {})
+		self.progressive_defense_enabled = bool(pd_cfg.get('enabled', True))
+		self.defense_tiers = pd_cfg.get('loss_tiers', [
+			{"realized_loss_pct": 0, "position_size_mult": 1.0, "label": "Normal"},
+			{"realized_loss_pct": 2, "position_size_mult": 0.5, "label": "50% size after -2%"},
+			{"realized_loss_pct": 3, "position_size_mult": 0.25, "label": "25% size after -3%"},
+			{"realized_loss_pct": 4, "position_size_mult": 0.0, "label": "HALT after -4%"}
+		])
+		self.consecutive_losses = 0
+		self.halt_new_orders = False
 
 	def register_new_order(self, ticket: int, direction: int, entry: float, sl: float, tp: float, alert_level: str, tier: Optional[str] = None):
 		self.managed[ticket] = ManagedOrder(ticket=ticket, open_time=datetime.utcnow(), entry=entry, sl=sl, tp=tp, direction=direction, alert_level=alert_level, tier=tier)
@@ -267,3 +292,86 @@ class OrderManager:
 		# Still waiting
 		return True
 
+	# ===== PROFESSOR'S FIXES: MICROSTRUCTURE & PROGRESSIVE DEFENSE =====
+	
+	def get_position_size_multiplier(self, realized_loss_pct: float) -> float:
+		"""Determine position size multiplier based on realized daily loss (progressive defense).
+		
+		Returns multiplier: 1.0 = normal, 0.5 = 50% size, 0.0 = HALT
+		"""
+		if not self.progressive_defense_enabled:
+			return 1.0
+		
+		# Find the appropriate tier
+		applicable_tier = {"position_size_mult": 1.0, "label": "Normal"}
+		
+		for tier in sorted(self.defense_tiers, key=lambda t: t['realized_loss_pct'], reverse=True):
+			if realized_loss_pct >= tier['realized_loss_pct']:
+				applicable_tier = tier
+				break
+		
+		mult = applicable_tier['position_size_mult']
+		label = applicable_tier['label']
+		
+		if realized_loss_pct > 0:
+			print(f"🛡️ Progressive defense: {label} (realized loss {realized_loss_pct:.1f}%, size mult {mult:.0%})")
+		
+		return mult
+	
+	def can_place_order(
+		self,
+		spread_pips: float,
+		high_range: float,
+		low_range: float,
+		atr_current: float,
+		timestamp: Optional[datetime] = None,
+		high_tier: bool = False
+	) -> Tuple[bool, Optional[str]]:
+		"""Master gate: check all microstructure + news conditions before placing order.
+		
+		Returns:
+			(can_trade: bool, rejection_reason: Optional[str])
+		"""
+		# 1. Check spread
+		spread_ok, spread_reason = self.microstructure_gate.spread_analyzer.check_spread(spread_pips)
+		if not spread_ok:
+			return False, spread_reason
+		
+		# 2. Check chop
+		is_chop, chop_reason = self.microstructure_gate.chop_detector.is_chop(high_range, low_range, atr_current)
+		if is_chop:
+			return False, chop_reason
+		
+		# 3. Check news (stricter for HIGH-tier)
+		can_trade_news, news_reason = self.news_gate.can_trade(timestamp, high_tier_only=high_tier)
+		if not can_trade_news:
+			return False, news_reason
+		
+		# 4. Check daily halt
+		if self.halt_new_orders:
+			return False, "DAILY_HALT_ACTIVE"
+		
+		return True, None
+	
+	def record_trade_closure(
+		self,
+		ticket: int,
+		close_price: float,
+		pnl_dollars: float,
+		exit_reason: str = "SL"
+	):
+		"""Track trade closure for progressive defense & failure mode analysis.
+		
+		Args:
+			ticket: Trade ticket number
+			close_price: Price at closure
+			pnl_dollars: Realized P&L
+			exit_reason: "SL", "TP", "TIME", "MANUAL"
+		"""
+		if pnl_dollars < 0:
+			self.consecutive_losses += 1
+		else:
+			self.consecutive_losses = 0
+		
+		# Persistence handled by existing persistence layer
+		# This is just for tracking consecutive losses for defense

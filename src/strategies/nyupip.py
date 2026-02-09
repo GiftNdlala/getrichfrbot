@@ -11,6 +11,7 @@ import pandas as pd
 import pytz
 
 from ..indicators import TechnicalIndicators
+from ..microstructure import ChopDetector
 
 
 @dataclass
@@ -70,6 +71,7 @@ class NYUPIPStrategy:
         self.cooldown = timedelta(minutes=cooldown_minutes)
         self.enable_rsi_confirmation = enable_rsi_confirmation
         self._indicators = TechnicalIndicators()
+        self._chop_detector = ChopDetector()  # Professor's fix: detect chop compressions
         self._last_signal_time: Dict[str, Optional[datetime]] = {"1HSMA": None, "CIS": None}
         self._context_snapshot: Dict[str, Any] = {}
         self._last_diagnostics: Dict[str, Any] = {
@@ -336,6 +338,18 @@ class NYUPIPStrategy:
         if not ctx.get("atr_valid"):
             diag["reason"] = "atr_filter_failed"
             return signals, diag
+
+        # Professor's fix #3: Detect chop/compression (reject if range < 0.6 × ATR)
+        h1: pd.DataFrame = ctx.get("h1")  # type: ignore[assignment]
+        if h1 is not None and len(h1) >= 20:
+            h1_high_20 = float(h1["High"].tail(20).max())
+            h1_low_20 = float(h1["Low"].tail(20).min())
+            atr_current = float(ctx.get("atr_current") or 1)
+            
+            is_chop, chop_reason = self._chop_detector.is_chop(h1_high_20, h1_low_20, atr_current)
+            if is_chop:
+                diag["reason"] = f"chop_compression_{chop_reason}"
+                return signals, diag
 
         m15_closed: pd.DataFrame = ctx.get("m15_closed")  # type: ignore[assignment]
         if m15_closed is None or len(m15_closed) < 5:
