@@ -1187,6 +1187,12 @@ class LiveDataStream:
                         if spread_block:
                             print(f"⛔ Spread block active; skipping signal generation for this tick ({current_quote.get('spread_points')})")
                             # Do not generate signals or persist them to avoid polluting signal stats
+                            # Sleep here to respect the configured update interval and avoid
+                            # tight loops when the spread guard is repeatedly triggered.
+                            try:
+                                time.sleep(self.update_interval)
+                            except Exception:
+                                pass
                             continue
 
                         # Generate signal
