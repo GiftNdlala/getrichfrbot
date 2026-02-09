@@ -149,7 +149,11 @@ class LiveDataStream:
         
         # Config
         self.config = get_config()
-
+        
+        # Signal commitment / cooldown settings
+        self.min_bars_between_direction_flips = int(self.config.get('min_bars_between_direction_flips', 10))
+        self.last_committed_direction = None  # -1, 0, 1
+        self.bars_since_last_commit = 9999
         # Resolve data mapping once for transparency/debug
         try:
             self.yf_symbol = self._map_symbol_to_yfinance()
@@ -1172,13 +1176,55 @@ class LiveDataStream:
                             atr_block = False
                         # Update historical data
                         self._update_historical_data(current_quote)
-                        
+
+                        # Increment bar counter (used for direction-flip cooldown)
+                        try:
+                            self.bars_since_last_commit += 1
+                        except Exception:
+                            self.bars_since_last_commit = 9999
+
+                        # If spread guard is active, skip signal generation entirely
+                        if spread_block:
+                            print(f"⛔ Spread block active; skipping signal generation for this tick ({current_quote.get('spread_points')})")
+                            # Do not generate signals or persist them to avoid polluting signal stats
+                            continue
+
                         # Generate signal
                         live_signal = self._generate_live_signal(current_quote)
                         
                         # Store current signal
                         self.current_signal = live_signal
                         self.last_update = datetime.now()
+
+                        # Apply minimum-bars cooldown for direction flips
+                        try:
+                            current_dir = int(live_signal.signal)
+                        except Exception:
+                            current_dir = 0
+
+                        if current_dir == 0:
+                            # no directional signal — let the bars counter continue
+                            pass
+                        else:
+                            if self.last_committed_direction is None:
+                                # first committed direction
+                                self.last_committed_direction = current_dir
+                                self.bars_since_last_commit = 0
+                            elif current_dir == self.last_committed_direction:
+                                # continuing same direction — reset counter
+                                self.bars_since_last_commit = 0
+                            else:
+                                # direction flip detected
+                                if self.bars_since_last_commit < self.min_bars_between_direction_flips:
+                                    print(f"⛔ Cooldown: flip {self.last_committed_direction}→{current_dir} ignored ({self.bars_since_last_commit}<{self.min_bars_between_direction_flips})")
+                                    # Mute the flip to avoid churn: convert to HOLD
+                                    live_signal.signal = 0
+                                    live_signal.signal_type = "COOLDOWN"
+                                    live_signal.confidence = min(live_signal.confidence, 50.0)
+                                else:
+                                    # allow flip
+                                    self.last_committed_direction = current_dir
+                                    self.bars_since_last_commit = 0
 
                         # Persist signal
                         if self.persistence:
