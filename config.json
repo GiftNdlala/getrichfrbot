@@ -3,7 +3,7 @@
     "name": "Exness",
     "platform": "MT5",
     "server": "Exness-MT5Trial9",
-    "login": 297352250, 
+    "login": 436151236, 
     "symbol": "XAUUSDm"  
   },
   "risk": {
@@ -13,7 +13,7 @@
     "tp_atr_multipliers": [0.3, 0.6, 1.0],
     "move_sl_to_be_after_tp1": true,
     "symbol_caps": {
-      "XAUUSDm": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 5.0 },
+      "XAUUSDm": { "daily_loss_limit_pct": 80.0, "max_open_risk_pct": 50.0 },
       "US30m": { "daily_loss_limit_pct": 5.0, "max_open_risk_pct": 6.0 }
     },
     "progressive_defense": {
@@ -29,7 +29,7 @@
 
   "sessions": {
     "timezone": "Africa/Johannesburg",
-    "trade_start": "06:00",
+    "trade_start": "00:01",
     "trade_end": "23:59",
     "days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
 },
@@ -40,7 +40,7 @@
     "source": "manual"
   },
   "filters": {
-    "max_spread_points": 100,
+    "max_spread_points": 40,
     "spread_spike_multiplier": 2.0,
     "min_tick_volume_ratio": 0.5,
     "consolidation_max_range_atr": 0.4,

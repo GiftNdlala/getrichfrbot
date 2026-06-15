@@ -8,6 +8,8 @@ import pandas as pd
 import numpy as np
 import time
 import threading
+import contextlib
+import io
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable, List
 import json
@@ -40,6 +42,10 @@ try:
     from .event_engine import EventEngine
 except ImportError:
     EventEngine = None
+try:
+    from .microstructure import SpreadAnalyzer
+except ImportError:
+    SpreadAnalyzer = None
 
 from .strategies import (
     NYUPIPStrategy,
@@ -149,6 +155,7 @@ class LiveDataStream:
         
         # Config
         self.config = get_config()
+        self.console_log_mode = str(self.config.get('console_log_mode', 'trades')).lower()
         
         # Signal commitment / cooldown settings
         self.min_bars_between_direction_flips = int(self.config.get('min_bars_between_direction_flips', 10))
@@ -160,14 +167,14 @@ class LiveDataStream:
             feeds = self.config.get('data_feed', {})
             primary = feeds.get('primary', 'MT5')
             backups = feeds.get('backups', [])
-            print(f"✅ Stream init for {self.symbol} | primary={primary} | backups={backups} | yfinance={self.yf_symbol} | gold={self._is_gold_symbol()}")
+            self._log_status(f"✅ Stream init for {self.symbol} | primary={primary} | backups={backups} | yfinance={self.yf_symbol} | gold={self._is_gold_symbol()}")
         except Exception:
             self.yf_symbol = self.symbol
 
         # Initialize WORKING real gold API only for gold symbols
         self.simple_gold_api = SimpleRealGold() if (SimpleRealGold and self._is_gold_symbol()) else None
         if self.simple_gold_api:
-            print("✅ WORKING Real Gold API initialized - getting ACTUAL $3,700+ market data")
+            self._log_status("✅ WORKING Real Gold API initialized - getting ACTUAL $3,700+ market data")
         
         # Keep other gold APIs as backups (gold only)
         self.working_gold_api = WorkingGoldAPI() if (WorkingGoldAPI and self._is_gold_symbol()) else None
@@ -177,7 +184,7 @@ class LiveDataStream:
             # This robust data source is gold-focused; use only for gold symbols
             self.data_source = RobustXAUUSDDataSource() if self._is_gold_symbol() else None
             if self.data_source:
-                print("✅ Backup data sources available")
+                self._log_status("✅ Backup data sources available")
         except:
             self.data_source = None
         
@@ -215,6 +222,16 @@ class LiveDataStream:
         self.enable_high = False
         # Event engine
         self.event_engine = EventEngine(self.symbol) if EventEngine else None
+        # Rolling spread baseline (30-minute window) for dynamic spread filtering.
+        self._latest_spread_points: Optional[float] = None
+        spread_lookback_minutes = 30
+        samples_per_minute = max(1, int(round(60 / max(self.update_interval, 1))))
+        spread_window = max(30, spread_lookback_minutes * samples_per_minute)
+        self.spread_analyzer = (
+            SpreadAnalyzer(lookback_minutes=spread_lookback_minutes, window_size=spread_window)
+            if SpreadAnalyzer
+            else None
+        )
         # Ensure MT5 uses this stream's symbol and reinitialize if needed
         try:
             if self.mt5:
@@ -249,7 +266,7 @@ class LiveDataStream:
         # NYUPIP strategy integration
         tz_name = self.config.get('sessions', {}).get('timezone', 'UTC')
 
-        self.nyupip_strategy = NYUPIPStrategy(symbol=self.symbol)
+        self.nyupip_strategy = NYUPIPStrategy(symbol=self.symbol, timezone=tz_name)
         self.nyupip_enabled = False
         self.nyupip_state: Dict[str, object] = {
             'enabled': False,
@@ -283,6 +300,21 @@ class LiveDataStream:
             'last_diagnostics': None,
             'auto_last_ticket': None,
         }
+
+    def _terminal_trades_only(self) -> bool:
+        return self.console_log_mode in {'trade', 'trades', 'orders', 'quiet'}
+
+    def _log_status(self, message: str):
+        if not self._terminal_trades_only():
+            print(message, flush=True)
+
+    def _log_trade(self, message: str):
+        print(message, flush=True)
+
+    def _quiet_status_stdout(self):
+        if self._terminal_trades_only():
+            return contextlib.redirect_stdout(io.StringIO())
+        return contextlib.nullcontext()
         
     def _is_gold_symbol(self) -> bool:
         try:
@@ -383,7 +415,7 @@ class LiveDataStream:
             expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
             missing = [c for c in expected_cols if c not in df.columns]
             if missing:
-                print(f"⚠️ Cached history missing columns {missing}; ignoring {resolved}")
+                self._log_status(f"⚠️ Cached history missing columns {missing}; ignoring {resolved}")
                 return None
             df = df[expected_cols].copy()
             # Drop duplicate column labels if any (e.g., both tick_volume and real_volume mapped to Volume)
@@ -392,12 +424,12 @@ class LiveDataStream:
             df.sort_index(inplace=True)
             df = df[~df.index.duplicated(keep='last')]
             if len(df) >= min_rows:
-                print(f"📦 Hydrated {len(df)} rows for {self.symbol} from cache {resolved}")
+                self._log_status(f"📦 Hydrated {len(df)} rows for {self.symbol} from cache {resolved}")
             else:
-                print(f"ℹ️ Cache {resolved} contains {len(df)} rows (< {min_rows}); will top up from live sources")
+                self._log_status(f"ℹ️ Cache {resolved} contains {len(df)} rows (< {min_rows}); will top up from live sources")
             return df
         except Exception as exc:
-            print(f"⚠️ Failed to hydrate history from {resolved}: {exc}")
+            self._log_status(f"⚠️ Failed to hydrate history from {resolved}: {exc}")
             return None
 
     def _write_history_csv(self, path: str, df: pd.DataFrame) -> None:
@@ -408,9 +440,9 @@ class LiveDataStream:
             export_df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
             export_df = export_df.sort_index()
             export_df.to_csv(resolved, index_label='Date')
-            print(f"💾 Cached {len(export_df)} rows for {self.symbol} to {resolved}")
+            self._log_status(f"💾 Cached {len(export_df)} rows for {self.symbol} to {resolved}")
         except Exception as exc:
-            print(f"⚠️ Failed to cache history to {path}: {exc}")
+            self._log_status(f"⚠️ Failed to cache history to {path}: {exc}")
 
     def _mt5_fetch_initial_history(self, count: int) -> pd.DataFrame:
         if not self.mt5:
@@ -444,13 +476,13 @@ class LiveDataStream:
                 df = df.loc[:, ~df.columns.duplicated(keep='last')]
             missing = [c for c in expected_cols if c not in df.columns]
             if missing:
-                print(f"⚠️ MT5 history missing columns {missing}")
+                self._log_status(f"⚠️ MT5 history missing columns {missing}")
                 return pd.DataFrame()
             df.sort_index(inplace=True)
             df = df[~df.index.duplicated(keep='last')]
             return df.tail(count)
         except Exception as exc:
-            print(f"⚠️ MT5 history error: {exc}")
+            self._log_status(f"⚠️ MT5 history error: {exc}")
             return pd.DataFrame()
 
     def _merge_history_frames(self, frames: List[pd.DataFrame]) -> pd.DataFrame:
@@ -473,7 +505,7 @@ class LiveDataStream:
     def _fetch_initial_data(self) -> pd.DataFrame:
         """Fetch initial historical data for indicator calculations"""
         try:
-            print("📊 Fetching initial historical data...")
+            self._log_status("📊 Fetching initial historical data...")
             feeds_cfg = self.config.get('data_feed', {})
             startup_cfg = feeds_cfg.get('startup_history', {})
             min_rows = self._coerce_positive_int(startup_cfg.get('min_rows'), 4800, minimum=1000)
@@ -507,9 +539,10 @@ class LiveDataStream:
                 fallback_data = None
                 if self.data_source is not None:
                     try:
-                        fallback_data = self.data_source.get_historical_data(days=365)
+                        with self._quiet_status_stdout():
+                            fallback_data = self.data_source.get_historical_data(days=365)
                     except Exception as exc:
-                        print(f"⚠️ Backup data source error: {exc}")
+                        self._log_status(f"⚠️ Backup data source error: {exc}")
                         fallback_data = None
                 if fallback_data is not None and not fallback_data.empty:
                     try:
@@ -529,7 +562,7 @@ class LiveDataStream:
                         sources.append(f"YF:{len(yf_data)}")
 
             if data is None or data.empty:
-                print("⚠️ No data received, using mock data")
+                self._log_status("⚠️ No data received, using mock data")
                 return self._generate_mock_data()
 
             data = data.sort_index()
@@ -541,25 +574,26 @@ class LiveDataStream:
             if len(data) > self._nyupip_history_limit:
                 data = data.tail(self._nyupip_history_limit)
 
-            data = self.indicators.calculate_all_indicators(data)
+            with self._quiet_status_stdout():
+                data = self.indicators.calculate_all_indicators(data)
 
             if len(data) < min_rows:
-                print(f"⚠️ Startup history only has {len(data)} rows (< {min_rows}); NYUPIP will wait for additional bars")
+                self._log_status(f"⚠️ Startup history only has {len(data)} rows (< {min_rows}); NYUPIP will wait for additional bars")
 
             try:
                 source_name = " + ".join(sources) if sources else 'unknown'
             except Exception:
                 source_name = 'unknown'
-            print(f"✅ Loaded {len(data)} historical data points from {source_name}")
+            self._log_status(f"✅ Loaded {len(data)} historical data points from {source_name}")
             return data
             
         except Exception as e:
-            print(f"❌ Error fetching initial data: {e}")
+            self._log_status(f"❌ Error fetching initial data: {e}")
             return self._generate_mock_data()
     
     def _generate_mock_data(self) -> pd.DataFrame:
         """Generate mock historical data if real data fails"""
-        print("🎭 Generating mock historical data...")
+        self._log_status("🎭 Generating mock historical data...")
         
         # Generate 365 days of mock data
         dates = pd.date_range(start=datetime.now() - timedelta(days=365), 
@@ -585,7 +619,8 @@ class LiveDataStream:
         }, index=dates)
         
         # Calculate indicators
-        data = self.indicators.calculate_all_indicators(data)
+        with self._quiet_status_stdout():
+            data = self.indicators.calculate_all_indicators(data)
         return data
     
     def _fetch_current_quote(self) -> Optional[Dict]:
@@ -597,7 +632,7 @@ class LiveDataStream:
                 if q and q.get('price', 0) > 0:
                     return q
             except Exception as e:
-                print(f"⚠️ MT5 quote error: {e}")
+                self._log_status(f"⚠️ MT5 quote error: {e}")
         
         # Fallbacks based on symbol type
         if self._is_gold_symbol():
@@ -606,7 +641,7 @@ class LiveDataStream:
                 try:
                     real_data = self.simple_gold_api.get_real_gold_price()
                     if real_data and real_data.get('price', 0) > 0:
-                        print(f"✅ REAL MARKET DATA: ${real_data['price']:.2f} from {real_data['source']}")
+                        self._log_status(f"✅ REAL MARKET DATA: ${real_data['price']:.2f} from {real_data['source']}")
                         
                         # Calculate realistic price change
                         if hasattr(self, 'last_real_price'):
@@ -624,14 +659,14 @@ class LiveDataStream:
                             'source': f"REAL-{real_data['source']}"
                         }
                 except Exception as e:
-                    print(f"⚠️ Simple Real Gold API error: {e}")
+                    self._log_status(f"⚠️ Simple Real Gold API error: {e}")
             
             # Fallback 2: Working Gold API as backup
             if self.working_gold_api:
                 try:
                     real_data = self.working_gold_api.get_real_gold_price()
                     if real_data and real_data.get('price', 0) > 0:
-                        print(f"✅ BACKUP REAL DATA: ${real_data['price']:.2f} from {real_data['source']}")
+                        self._log_status(f"✅ BACKUP REAL DATA: ${real_data['price']:.2f} from {real_data['source']}")
                         return {
                             'price': float(real_data['price']),
                             'prev_close': real_data['price'] - np.random.normal(0, 3),
@@ -640,14 +675,14 @@ class LiveDataStream:
                             'source': f"REAL-{real_data['source']}"
                         }
                 except Exception as e:
-                    print(f"⚠️ Working Gold API error: {e}")
+                    self._log_status(f"⚠️ Working Gold API error: {e}")
             
             # Fallback 3: robust data source (gold)
             if self.data_source:
                 try:
                     current_data = self.data_source.get_current_price()
                     if current_data and current_data.get('price', 0) > 0:
-                        print(f"✅ ROBUST DATA: ${current_data['price']:.2f}")
+                        self._log_status(f"✅ ROBUST DATA: ${current_data['price']:.2f}")
                         return {
                             'price': current_data['price'],
                             'prev_close': current_data.get('prev_close', current_data['price']),
@@ -655,7 +690,7 @@ class LiveDataStream:
                             'volume': current_data.get('volume', 50000)
                         }
                 except Exception as e:
-                    print(f"⚠️ Robust data source error: {e}")
+                    self._log_status(f"⚠️ Robust data source error: {e}")
         else:
             # Non-gold symbols: use Yahoo Finance only if configured as a backup
             feeds = self.config.get('data_feed', {})
@@ -663,11 +698,11 @@ class LiveDataStream:
             if 'YF' in [b.upper() if isinstance(b, str) else b for b in backups]:
                 yf_quote = self._yf_get_current_quote()
                 if yf_quote and yf_quote.get('price', 0) > 0:
-                    print(f"✅ YF DATA {yf_quote['source']}: ${yf_quote['price']:.2f}")
+                    self._log_status(f"✅ YF DATA {yf_quote['source']}: ${yf_quote['price']:.2f}")
                     return yf_quote
         
         # Method 4: ONLY use realistic mock as absolute last resort
-        print("🚨 WARNING: All REAL sources failed - using realistic mock")
+        self._log_status("🚨 WARNING: All REAL sources failed - using realistic mock")
         return self._generate_realistic_quote()
     
     def _generate_mock_quote(self) -> Dict:
@@ -722,7 +757,8 @@ class LiveDataStream:
             self.historical_data = self.historical_data.tail(self._history_limit_default)
 
         # Recalculate indicators
-        self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
+        with self._quiet_status_stdout():
+            self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
 
         # Maintain a deeper buffer for NYUPIP strategy analysis
         nyupip_row = new_row.reindex(columns=["Open", "High", "Low", "Close", "Volume"])
@@ -861,7 +897,7 @@ class LiveDataStream:
                 }
                 
         except Exception as e:
-            print(f"⚠️ Error determining signal category: {e}")
+            self._log_status(f"⚠️ Error determining signal category: {e}")
             return {
                 'alert_level': 'LOW',
                 'alert_color': '#4CAF50',
@@ -999,7 +1035,7 @@ class LiveDataStream:
             })
             
         except Exception as e:
-            print(f"⚠️ Error calculating risk management: {e}")
+            self._log_status(f"⚠️ Error calculating risk management: {e}")
         
         return risk_mgmt
 
@@ -1013,7 +1049,8 @@ class LiveDataStream:
         latest_data = self.historical_data.iloc[-1]
         
         # Generate signal using signal generator
-        signal_data = self.signal_generator.generate_all_signals(self.historical_data.tail(50))
+        with self._quiet_status_stdout():
+            signal_data = self.signal_generator.generate_all_signals(self.historical_data.tail(50))
         current_signal = signal_data['signal'].iloc[-1] if 'signal' in signal_data.columns else 0
         # Ensemble quality metrics (optional, but very useful for gating HIGH/MED to reduce chop)
         last_row = signal_data.iloc[-1] if signal_data is not None and not signal_data.empty else None
@@ -1126,7 +1163,7 @@ class LiveDataStream:
             confidence_score = min(confidence_score, 95.0)
             
         except Exception as e:
-            print(f"⚠️ Error calculating confidence: {e}")
+            self._log_status(f"⚠️ Error calculating confidence: {e}")
         
         return confidence_score
     
@@ -1140,15 +1177,15 @@ class LiveDataStream:
             try:
                 callback(signal)
             except Exception as e:
-                print(f"⚠️ Error in callback: {e}")
+                self._log_status(f"⚠️ Error in callback: {e}")
     
     def start_streaming(self):
         """Start the live data streaming"""
         self.is_running = True
         
         def stream_loop():
-            print(f"🚀 Starting live data stream for {self.symbol}")
-            print(f"⏱️ Update interval: {self.update_interval} seconds")
+            self._log_status(f"🚀 Starting live data stream for {self.symbol}")
+            self._log_status(f"⏱️ Update interval: {self.update_interval} seconds")
             
             while self.is_running:
                 try:
@@ -1162,15 +1199,52 @@ class LiveDataStream:
                             max_spread = float(filters.get('max_spread_points', 30))
                             min_atr_pips = float(filters.get('min_atr_pips', 3))
                             latest_atr = float(self.historical_data.iloc[-1].get('ATR_14', 0)) if not self.historical_data.empty else 0
-                            if current_quote.get('spread_points') and current_quote['spread_points'] > max_spread:
-                                print(f"⛔ Spread guard: {current_quote['spread_points']:.1f} > {max_spread}")
-                                # Still update data/UI but skip sends this tick
-                                spread_block = True
-                            else:
-                                spread_block = False
+                            spread_block = False
+                            spread_points = current_quote.get('spread_points')
+                            spread_reason = None
+                            if spread_points is not None:
+                                spread_points = float(spread_points)
+                                self._latest_spread_points = spread_points
+
+                                # Feed rolling spread history used by master gates.
+                                if self.spread_analyzer:
+                                    self.spread_analyzer.record(spread_points)
+                                    spread_ok, spread_reason = self.spread_analyzer.check_spread(spread_points)
+                                    if not spread_ok:
+                                        spread_block = True
+                                        self._log_status(f"⛔ Spread guard (rolling 30m): {spread_reason}")
+
+                                if (
+                                    not spread_block
+                                    and (
+                                        self.spread_analyzer is None
+                                        or len(self.spread_analyzer.spread_history) < 20
+                                    )
+                                ):
+                                    bootstrap_cap = max_spread
+                                    if self.spread_analyzer and len(self.spread_analyzer.spread_history) >= 5:
+                                        recent_spreads = [s for _, s in self.spread_analyzer.spread_history]
+                                        seed_median = float(np.median(recent_spreads))
+                                        # Adaptive bootstrap cap:
+                                        # keep configured floor, but allow brokers with wider normal point spreads.
+                                        bootstrap_cap = max(max_spread, seed_median * 2.5)
+                                    if spread_points > bootstrap_cap:
+                                        spread_block = True
+                                        self._log_status(
+                                            f"⛔ Spread guard (bootstrap cap): {spread_points:.1f} > {bootstrap_cap:.1f}"
+                                        )
+
+                                if self.order_manager:
+                                    try:
+                                        self.order_manager.microstructure_gate.record_spread(
+                                            spread_points,
+                                            current_quote.get('timestamp'),
+                                        )
+                                    except Exception:
+                                        pass
                             atr_block = latest_atr < min_atr_pips
                             if atr_block:
-                                print(f"⛔ ATR guard: ATR_14 {latest_atr:.2f} < {min_atr_pips}")
+                                self._log_status(f"⛔ ATR guard: ATR_14 {latest_atr:.2f} < {min_atr_pips}")
                         except Exception:
                             spread_block = False
                             atr_block = False
@@ -1185,7 +1259,7 @@ class LiveDataStream:
 
                         # If spread guard is active, skip signal generation entirely
                         if spread_block:
-                            print(f"⛔ Spread block active; skipping signal generation for this tick ({current_quote.get('spread_points')})")
+                            self._log_status(f"⛔ Spread block active; skipping signal generation for this tick ({current_quote.get('spread_points')})")
                             # Do not generate signals or persist them to avoid polluting signal stats
                             # Sleep here to respect the configured update interval and avoid
                             # tight loops when the spread guard is repeatedly triggered.
@@ -1222,7 +1296,7 @@ class LiveDataStream:
                             else:
                                 # direction flip detected
                                 if self.bars_since_last_commit < self.min_bars_between_direction_flips:
-                                    print(f"⛔ Cooldown: flip {self.last_committed_direction}→{current_dir} ignored ({self.bars_since_last_commit}<{self.min_bars_between_direction_flips})")
+                                    self._log_status(f"⛔ Cooldown: flip {self.last_committed_direction}→{current_dir} ignored ({self.bars_since_last_commit}<{self.min_bars_between_direction_flips})")
                                     # Mute the flip to avoid churn: convert to HOLD
                                     live_signal.signal = 0
                                     live_signal.signal_type = "COOLDOWN"
@@ -1237,13 +1311,13 @@ class LiveDataStream:
                             try:
                                 self.persistence.save_signal(asdict(live_signal))
                             except Exception as e:
-                                print(f"⚠️ Persist error: {e}")
+                                self._log_status(f"⚠️ Persist error: {e}")
                         
                         # Notify callbacks
                         self._notify_callbacks(live_signal)
                         
-                        # Print update
-                        print(f"🔄 {live_signal.timestamp} | {live_signal.symbol} | ${live_signal.current_price:.2f} | {live_signal.signal_type} ({live_signal.confidence:.1f}%)")
+                        # Keep frontend callbacks/history updated without printing every signal tick.
+                        self._log_status(f"🔄 {live_signal.timestamp} | {live_signal.symbol} | ${live_signal.current_price:.2f} | {live_signal.signal_type} ({live_signal.confidence:.1f}%)")
 
                         # Event override path
                         if self.event_mode_enabled and self.event_engine:
@@ -1260,12 +1334,19 @@ class LiveDataStream:
                                     sl = idea['sl']
                                     tp = idea['tp']
                                     trade = self.autotrader.place_market_order(side, entry, sl, tp)
+                                    if trade:
+                                        self._log_trade(f"ORDER SENT [EVENT]: ticket={trade.get('ticket')} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={tp:.2f}")
+                                        if self.order_manager:
+                                            try:
+                                                self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp, 'EVENT', tier='EVENT')
+                                            except Exception as e:
+                                                self._log_status(f"Order manager EVENT error: {e}")
                                     if trade and self.persistence:
                                         self.persistence.save_trade({
                                             'timestamp': live_signal.timestamp,
                                             'symbol': live_signal.symbol,
                                             'direction': side,
-                                            'entry': entry,
+                                            'entry': trade.get('price', entry),
                                             'sl': sl,
                                             'tp': tp,
                                             'lots': trade.get('volume', 0.0),
@@ -1275,9 +1356,8 @@ class LiveDataStream:
                                             'tier': 'EVENT',
                                             'engine': 'EVENT'
                                         })
-                                        print(f"⚡ [EVENT] order sent: ticket={trade.get('ticket')} entry={entry:.2f} sl={sl:.2f} tp={tp:.2f}")
                             except Exception as e:
-                                print(f"⚠️ Event engine error: {e}")
+                                self._log_status(f"⚠️ Event engine error: {e}")
 
                         # Auto-trading (opt-in) with campaign and per-alert logic
                         if (
@@ -1292,7 +1372,7 @@ class LiveDataStream:
                         ):
                             # Respect per-symbol daily loss cap halt
                             if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
-                                print(f"⏸️ Halt new orders (daily cap) for {self.symbol}")
+                                self._log_status(f"⏸️ Halt new orders (daily cap) for {self.symbol}")
                                 continue
                             level = (live_signal.alert_level or 'LOW').upper()
                             side = 1 if live_signal.signal == 1 else -1
@@ -1321,11 +1401,11 @@ class LiveDataStream:
                             if general_allowed:
                                 # Per-engine gating
                                 if level == 'LOW' and not self.enable_low:
-                                    print("⏸️ Engine gated: LOW disabled")
+                                    self._log_status("⏸️ Engine gated: LOW disabled")
                                 elif level == 'MEDIUM' and not self.enable_medium:
-                                    print("⏸️ Engine gated: MEDIUM disabled")
+                                    self._log_status("⏸️ Engine gated: MEDIUM disabled")
                                 elif level == 'HIGH' and not self.enable_high:
-                                    print("⏸️ Engine gated: HIGH disabled")
+                                    self._log_status("⏸️ Engine gated: HIGH disabled")
                                 else:
                                     # Additional quality gates (configurable) for HIGH/MEDIUM to reduce chop losses.
                                     # These are designed to trade less, but cleaner.
@@ -1352,10 +1432,10 @@ class LiveDataStream:
                                             agreeing_votes = pos_votes if side == 1 else neg_votes
 
                                             if agreeing_votes < min_strength:
-                                                print(f"⛔ Quality gate: {level} blocked (agreeing_votes {agreeing_votes} < {min_strength}, pos={pos_votes} neg={neg_votes})")
+                                                self._log_status(f"⛔ Quality gate: {level} blocked (agreeing_votes {agreeing_votes} < {min_strength}, pos={pos_votes} neg={neg_votes})")
                                                 continue
                                             if vote_margin < min_vote_margin:
-                                                print(f"⛔ Quality gate: {level} blocked (vote_margin {vote_margin:.1f} < {min_vote_margin})")
+                                                self._log_status(f"⛔ Quality gate: {level} blocked (vote_margin {vote_margin:.1f} < {min_vote_margin})")
                                                 continue
 
                                             # Higher-timeframe trend alignment using SMA_200 if available
@@ -1365,20 +1445,20 @@ class LiveDataStream:
                                                     price = float(latest_data.get('Close', live_signal.current_price))
                                                     if not np.isnan(sma200):
                                                         if side == 1 and price < sma200:
-                                                            print(f"⛔ Trend gate: {level} BUY blocked (price {price:.2f} < SMA_200 {sma200:.2f})")
+                                                            self._log_status(f"⛔ Trend gate: {level} BUY blocked (price {price:.2f} < SMA_200 {sma200:.2f})")
                                                             continue
                                                         if side == -1 and price > sma200:
-                                                            print(f"⛔ Trend gate: {level} SELL blocked (price {price:.2f} > SMA_200 {sma200:.2f})")
+                                                            self._log_status(f"⛔ Trend gate: {level} SELL blocked (price {price:.2f} > SMA_200 {sma200:.2f})")
                                                             continue
                                                 except Exception:
                                                     # If SMA_200 not available, don't block; avoid breaking live runs
                                                     pass
                                         except Exception as e:
-                                            print(f"⚠️ Quality gate error (ignored): {e}")
+                                            self._log_status(f"⚠️ Quality gate error (ignored): {e}")
 
                                     # campaign check
                                     if self.campaign and not self.campaign.allow(self.symbol, side, level):
-                                        print(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
+                                        self._log_status(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
                                     else:
                                         # Determine TP by level/tiering
                                         tp = live_signal.take_profit_1
@@ -1410,13 +1490,15 @@ class LiveDataStream:
                                             elif tp_pips_override is not None:
                                                 local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
                                             trade = self.autotrader.place_market_order(side, entry, sl, local_tp)
+                                            if trade:
+                                                self._log_trade(f"ORDER SENT [{engine}]: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={local_tp:.2f}")
                                             if trade and self.persistence:
                                                 try:
                                                     self.persistence.save_trade({
                                                         'timestamp': live_signal.timestamp,
                                                         'symbol': live_signal.symbol,
                                                         'direction': side,
-                                                        'entry': entry,
+                                                        'entry': trade.get('price', entry),
                                                         'sl': sl,
                                                         'tp': local_tp,
                                                         'lots': trade.get('volume', 0.0),
@@ -1426,13 +1508,15 @@ class LiveDataStream:
                                                         'tier': tier_name or '',
                                                         'engine': engine
                                                     })
-                                                    print(f"✅ [{engine}] Order sent: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'}")
-                                                    if self.order_manager:
-                                                        self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
-                                                    if self.campaign:
-                                                        self.campaign.record(self.symbol, side, level)
                                                 except Exception as e:
-                                                    print(f"⚠️ Trade persist error: {e}")
+                                                    self._log_status(f"⚠️ Trade persist error: {e}")
+                                            if trade and self.order_manager:
+                                                try:
+                                                    self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
+                                                except Exception as e:
+                                                    self._log_status(f"Order manager {engine} error: {e}")
+                                            if trade and self.campaign:
+                                                self.campaign.record(self.symbol, side, level)
                                         if level == 'HIGH' and tiers:
                                             # Send tiered partials first
                                             for tier_name, pips in tiers:
@@ -1447,11 +1531,11 @@ class LiveDataStream:
                                             send_one(None, None, tp_absolute=tp, engine=engine_name)
                             else:
                                 if engine_mode == 'NONE':
-                                    print("⏸️ Engine mode NONE blocking automated entries")
+                                    self._log_status("⏸️ Engine mode NONE blocking automated entries")
                                 elif engine_mode == 'FARMER_ONLY':
-                                    print("⏸️ Engine mode FARMER_ONLY skipping tiered engines")
+                                    self._log_status("⏸️ Engine mode FARMER_ONLY skipping tiered engines")
                                 elif engine_mode.endswith('_ONLY'):
-                                    print(f"⏸️ Engine mode {engine_mode} skipping {level} signal")
+                                    self._log_status(f"⏸️ Engine mode {engine_mode} skipping {level} signal")
 
                             # 2-pip farmer (runs alongside, subject to farmer cycle)
                             try:
@@ -1486,13 +1570,15 @@ class LiveDataStream:
                                             sl = entry - sl_pips if side == 1 else entry + sl_pips
                                             tp_small = entry + tp_pips if side == 1 else entry - tp_pips
                                             trade = self.autotrader.place_market_order(side, entry, sl, tp_small)
+                                            if trade:
+                                                self._log_trade(f"ORDER SENT [FARMER]: ticket={trade.get('ticket')} lots={trade.get('volume')} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={tp_small:.2f}")
                                             if trade and self.persistence:
                                                 try:
                                                     self.persistence.save_trade({
                                                         'timestamp': live_signal.timestamp,
                                                         'symbol': live_signal.symbol,
                                                         'direction': side,
-                                                        'entry': entry,
+                                                        'entry': trade.get('price', entry),
                                                         'sl': sl,
                                                         'tp': tp_small,
                                                         'lots': trade.get('volume', 0.0),
@@ -1502,13 +1588,15 @@ class LiveDataStream:
                                                         'tier': 'FARMER',
                                                         'engine': 'FARMER'
                                                     })
-                                                    if self.order_manager:
-                                                        self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp_small, 'HIGH', tier='FARMER')
-                                                    if self.campaign:
-                                                        self.campaign.record(self.symbol, side, 'HIGH')
-                                                    print(f"🌾 Farmer order sent: ticket={trade.get('ticket')} tp={tp_pips}p atr={atr_val:.2f}")
                                                 except Exception as e:
-                                                    print(f"⚠️ Farmer persist error: {e}")
+                                                    self._log_status(f"⚠️ Farmer persist error: {e}")
+                                            if trade and self.order_manager:
+                                                try:
+                                                    self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp_small, 'HIGH', tier='FARMER')
+                                                except Exception as e:
+                                                    self._log_status(f"Order manager FARMER error: {e}")
+                                            if trade and self.campaign:
+                                                self.campaign.record(self.symbol, side, 'HIGH')
                             except Exception:
                                 pass
 
@@ -1518,9 +1606,9 @@ class LiveDataStream:
                                 nyupip_history = self._get_nyupip_history()
                                 
                                 if nyupip_history is None or nyupip_history.empty:
-                                    print(f"🔍 [{eval_time}] NYUPIP: Evaluating | ⚠️ No history data available")
+                                    self._log_status(f"🔍 [{eval_time}] NYUPIP: Evaluating | ⚠️ No history data available")
                                 else:
-                                    print(f"🔍 [{eval_time}] NYUPIP: Evaluating | History: {len(nyupip_history)} bars")
+                                    self._log_status(f"🔍 [{eval_time}] NYUPIP: Evaluating | History: {len(nyupip_history)} bars")
                                 
                                 nyupip_signals = self.nyupip_strategy.evaluate(nyupip_history.copy(), current_quote)
                                 self.nyupip_state['last_diagnostics'] = self.nyupip_strategy.get_last_diagnostics()
@@ -1530,13 +1618,18 @@ class LiveDataStream:
                                 reason = diag.get('reason', 'no_reason')
                                 
                                 if nyupip_signals:
-                                    print(f"✅ [{eval_time}] NYUPIP: {len(nyupip_signals)} signal(s) generated | Status: {status}")
+                                    self._log_status(f"✅ [{eval_time}] NYUPIP: {len(nyupip_signals)} signal(s) generated | Status: {status}")
                                     for nyupip_signal in nyupip_signals:
-                                        self._process_nyupip_signal(nyupip_signal, spread_block, atr_block)
+                                        self._process_nyupip_signal(
+                                            nyupip_signal,
+                                            spread_block,
+                                            atr_block,
+                                            current_quote=current_quote,
+                                        )
                                 else:
                                     # Format reason for readability
                                     reason_display = reason.replace('_', ' ').title() if reason else 'No signal conditions met'
-                                    print(f"⏸️ [{eval_time}] NYUPIP: No signals | Status: {status} | Reason: {reason_display}")
+                                    self._log_status(f"⏸️ [{eval_time}] NYUPIP: No signals | Status: {status} | Reason: {reason_display}")
                                     
                                     # Show detailed diagnostics if available
                                     if diag.get('summary'):
@@ -1544,10 +1637,10 @@ class LiveDataStream:
                                         zone_status = "✓" if summary.get('zone_valid') else "✗"
                                         atr_status = "✓" if summary.get('atr_valid') else "✗"
                                         trendline_status = "✓" if summary.get('trendline_valid') else "✗"
-                                        print(f"   └─ Zone: {zone_status} | ATR: {atr_status} | Trendline: {trendline_status}")
+                                        self._log_status(f"   └─ Zone: {zone_status} | ATR: {atr_status} | Trendline: {trendline_status}")
                                         
                             except Exception as e:
-                                print(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] NYUPIP processing error: {e}")
+                                self._log_status(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] NYUPIP processing error: {e}")
 
                         strategy_history = None
                         try:
@@ -1567,9 +1660,9 @@ class LiveDataStream:
                                 eval_time = datetime.now().strftime("%H:%M:%S")
                                 
                                 if strategy_history is None or strategy_history.empty:
-                                    print(f"🔍 [{eval_time}] ICT Swing: Evaluating | ⚠️ No history data available")
+                                    self._log_status(f"🔍 [{eval_time}] ICT Swing: Evaluating | ⚠️ No history data available")
                                 else:
-                                    print(f"🔍 [{eval_time}] ICT Swing: Evaluating | History: {len(strategy_history)} bars")
+                                    self._log_status(f"🔍 [{eval_time}] ICT Swing: Evaluating | History: {len(strategy_history)} bars")
                                 
                                 swing_signals, swing_diag = self.ict_swing_strategy.evaluate(strategy_history, current_quote)
                                 self.ict_swing_state['last_diagnostics'] = swing_diag
@@ -1578,13 +1671,13 @@ class LiveDataStream:
                                 reason = swing_diag.get('reason', 'no_reason')
                                 
                                 if swing_signals:
-                                    print(f"✅ [{eval_time}] ICT Swing: {len(swing_signals)} signal(s) generated | Status: {status}")
+                                    self._log_status(f"✅ [{eval_time}] ICT Swing: {len(swing_signals)} signal(s) generated | Status: {status}")
                                     for swing_signal in swing_signals:
                                         self._process_ict_swing_signal(swing_signal, spread_block, atr_block)
                                 else:
                                     # Format reason for readability
                                     reason_display = reason.replace('_', ' ').title() if reason else 'No signal conditions met'
-                                    print(f"⏸️ [{eval_time}] ICT Swing: No signals | Status: {status} | Reason: {reason_display}")
+                                    self._log_status(f"⏸️ [{eval_time}] ICT Swing: No signals | Status: {status} | Reason: {reason_display}")
                                     
                                     # Show session alignment info if available
                                     summary = swing_diag.get('summary', {})
@@ -1594,19 +1687,19 @@ class LiveDataStream:
                                             asian = sessions.get('asian', {})
                                             london = sessions.get('london', {})
                                             ny = sessions.get('new_york', {})
-                                            print(f"   └─ Asian: {asian.get('open', 'N/A')} | London: {london.get('open', 'N/A')} | NY: {ny.get('open', 'N/A')}")
+                                            self._log_status(f"   └─ Asian: {asian.get('open', 'N/A')} | London: {london.get('open', 'N/A')} | NY: {ny.get('open', 'N/A')}")
                                         
                             except Exception as e:
-                                print(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing processing error: {e}")
+                                self._log_status(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing processing error: {e}")
 
                         if self.ict_atm_enabled and self.ict_atm_strategy and self._is_gold_symbol():
                             try:
                                 eval_time = datetime.now().strftime("%H:%M:%S")
                                 
                                 if strategy_history is None or strategy_history.empty:
-                                    print(f"🔍 [{eval_time}] ICT ATM: Evaluating | ⚠️ No history data available")
+                                    self._log_status(f"🔍 [{eval_time}] ICT ATM: Evaluating | ⚠️ No history data available")
                                 else:
-                                    print(f"🔍 [{eval_time}] ICT ATM: Evaluating | History: {len(strategy_history)} bars")
+                                    self._log_status(f"🔍 [{eval_time}] ICT ATM: Evaluating | History: {len(strategy_history)} bars")
                                 
                                 atm_signals, atm_diag = self.ict_atm_strategy.evaluate(strategy_history, current_quote)
                                 self.ict_atm_state['last_diagnostics'] = atm_diag
@@ -1615,13 +1708,13 @@ class LiveDataStream:
                                 reason = atm_diag.get('reason', 'no_reason')
                                 
                                 if atm_signals:
-                                    print(f"✅ [{eval_time}] ICT ATM: {len(atm_signals)} signal(s) generated | Status: {status}")
+                                    self._log_status(f"✅ [{eval_time}] ICT ATM: {len(atm_signals)} signal(s) generated | Status: {status}")
                                     for atm_signal in atm_signals:
                                         self._process_ict_atm_signal(atm_signal, spread_block, atr_block)
                                 else:
                                     # Format reason for readability
                                     reason_display = reason.replace('_', ' ').title() if reason else 'No signal conditions met'
-                                    print(f"⏸️ [{eval_time}] ICT ATM: No signals | Status: {status} | Reason: {reason_display}")
+                                    self._log_status(f"⏸️ [{eval_time}] ICT ATM: No signals | Status: {status} | Reason: {reason_display}")
                                     
                                     # Show detailed diagnostics if available
                                     summary = atm_diag.get('summary', {})
@@ -1630,16 +1723,16 @@ class LiveDataStream:
                                         atr_avg = summary.get('atr_avg')
                                         if atr_current is not None and atr_avg is not None:
                                             atr_ratio = atr_current / atr_avg if atr_avg > 0 else 0
-                                            print(f"   └─ ATR Current: {atr_current:.2f} | ATR Avg: {atr_avg:.2f} | Ratio: {atr_ratio:.2f}x")
+                                            self._log_status(f"   └─ ATR Current: {atr_current:.2f} | ATR Avg: {atr_avg:.2f} | Ratio: {atr_ratio:.2f}x")
                                         
                             except Exception as e:
-                                print(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM processing error: {e}")
+                                self._log_status(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM processing error: {e}")
                         
                     else:
-                        print("⚠️ Failed to fetch current quote")
-                
+                        self._log_status("⚠️ Failed to fetch current quote")
+                    
                 except Exception as e:
-                    print(f"❌ Error in streaming loop: {e}")
+                    self._log_status(f"❌ Error in streaming loop: {e}")
                 
                 # Reconcile positions periodically
                 try:
@@ -1657,7 +1750,7 @@ class LiveDataStream:
     def stop_streaming(self):
         """Stop the live data streaming"""
         self.is_running = False
-        print("🛑 Live data streaming stopped")
+        self._log_status("🛑 Live data streaming stopped")
     
     def get_current_signal(self) -> Optional[LiveSignal]:
         """Get the current live signal"""
@@ -1782,7 +1875,7 @@ class LiveDataStream:
         else:
             self.nyupip_state['last_diagnostics'] = None
         status = 'enabled' if self.nyupip_enabled else 'disabled'
-        print(f"🟣 NYUPIP strategy {status} for {self.symbol}")
+        self._log_status(f"🟣 NYUPIP strategy {status} for {self.symbol}")
 
     def get_nyupip_state(self) -> Dict[str, object]:
         return {
@@ -1796,14 +1889,14 @@ class LiveDataStream:
         if not self._is_gold_symbol() or not self.ict_swing_strategy:
             self.ict_swing_enabled = False
             self.ict_swing_state['enabled'] = False
-            print("🟠 ICT Swing strategy unavailable for non-gold symbol")
+            self._log_status("🟠 ICT Swing strategy unavailable for non-gold symbol")
             return
         self.ict_swing_enabled = bool(enabled)
         self.ict_swing_state['enabled'] = self.ict_swing_enabled
         if self.ict_swing_enabled:
             self.ict_swing_state['last_diagnostics'] = self.ict_swing_strategy.get_last_diagnostics()
         status = 'enabled' if self.ict_swing_enabled else 'disabled'
-        print(f"🟠 ICT Swing strategy {status} for {self.symbol}")
+        self._log_status(f"🟠 ICT Swing strategy {status} for {self.symbol}")
 
     def get_ict_swing_state(self) -> Dict[str, object]:
         return {
@@ -1817,14 +1910,14 @@ class LiveDataStream:
         if not self._is_gold_symbol() or not self.ict_atm_strategy:
             self.ict_atm_enabled = False
             self.ict_atm_state['enabled'] = False
-            print("🟣 ICT ATM strategy unavailable for non-gold symbol")
+            self._log_status("🟣 ICT ATM strategy unavailable for non-gold symbol")
             return
         self.ict_atm_enabled = bool(enabled)
         self.ict_atm_state['enabled'] = self.ict_atm_enabled
         if self.ict_atm_enabled:
             self.ict_atm_state['last_diagnostics'] = self.ict_atm_strategy.get_last_diagnostics()
         status = 'enabled' if self.ict_atm_enabled else 'disabled'
-        print(f"🟣 ICT ATM strategy {status} for {self.symbol}")
+        self._log_status(f"🟣 ICT ATM strategy {status} for {self.symbol}")
 
     def get_ict_atm_state(self) -> Dict[str, object]:
         return {
@@ -1834,13 +1927,19 @@ class LiveDataStream:
             'last_diagnostics': self.ict_atm_state.get('last_diagnostics'),
         }
 
-    def _process_nyupip_signal(self, signal: NYUPIPSignal, spread_block: bool, atr_block: bool):
+    def _process_nyupip_signal(
+        self,
+        signal: NYUPIPSignal,
+        spread_block: bool,
+        atr_block: bool,
+        current_quote: Optional[Dict[str, float]] = None,
+    ):
         payload = signal.to_payload()
         self.nyupip_state['last_signal'] = payload
         self.nyupip_state['last_diagnostics'] = self.nyupip_strategy.get_last_diagnostics()
 
         direction = 'BUY' if signal.direction == 1 else 'SELL'
-        print(
+        self._log_status(
             f"🟣 [NYUPIP-{signal.module}] {direction} @ {signal.entry_price:.2f} | "
             f"SL {signal.stop_loss:.2f} | TP {signal.take_profit_primary:.2f} | RR {signal.risk_reward:.2f}"
         )
@@ -1856,7 +1955,41 @@ class LiveDataStream:
                 })
                 self.persistence.save_signal(record)
             except Exception as exc:
-                print(f"⚠️ NYUPIP persist error: {exc}")
+                self._log_status(f"⚠️ NYUPIP persist error: {exc}")
+
+        order_gate_reason = None
+        daily_halt_active = bool(self.order_manager and getattr(self.order_manager, 'halt_new_orders', False))
+        if self.order_manager:
+            try:
+                spread_points = 0.0
+                if current_quote and current_quote.get('spread_points') is not None:
+                    spread_points = float(current_quote.get('spread_points', 0.0) or 0.0)
+                elif self._latest_spread_points is not None:
+                    spread_points = float(self._latest_spread_points)
+
+                atr_current = 0.0
+                high_range = signal.entry_price
+                low_range = signal.entry_price
+                if self.historical_data is not None and not self.historical_data.empty:
+                    latest_row = self.historical_data.iloc[-1]
+                    atr_current = float(latest_row.get('ATR_14', 0.0) or 0.0)
+                    if 'High' in self.historical_data.columns and 'Low' in self.historical_data.columns:
+                        window = self.historical_data.tail(20)
+                        high_range = float(window['High'].max())
+                        low_range = float(window['Low'].min())
+
+                gate_ok, gate_reason = self.order_manager.can_place_order(
+                    spread_pips=spread_points,
+                    high_range=high_range,
+                    low_range=low_range,
+                    atr_current=atr_current,
+                    timestamp=signal.timestamp,
+                    high_tier=True,
+                )
+                if not gate_ok:
+                    order_gate_reason = gate_reason or "order_gate_blocked"
+            except Exception as exc:
+                self._log_status(f"⚠️ NYUPIP order gate error: {exc}")
 
         can_trade = (
             self.autotrader
@@ -1866,6 +1999,8 @@ class LiveDataStream:
             and not atr_block
             and not self.event_mode_enabled
             and not self._is_blackout_or_off_session()
+            and not daily_halt_active
+            and not order_gate_reason
         )
 
         if not can_trade:
@@ -1885,9 +2020,13 @@ class LiveDataStream:
                 block_reasons.append("Event mode active")
             if self._is_blackout_or_off_session():
                 block_reasons.append("Outside trading session")
+            if daily_halt_active:
+                block_reasons.append("Daily loss cap reached")
+            if order_gate_reason:
+                block_reasons.append(f"Order gate: {order_gate_reason}")
             
             reason_str = " | ".join(block_reasons) if block_reasons else "Unknown reason"
-            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] NYUPIP: Signal generated but blocked | {reason_str}")
+            self._log_status(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] NYUPIP: Signal generated but blocked | {reason_str}")
             return
 
         try:
@@ -1898,7 +2037,7 @@ class LiveDataStream:
                 signal.take_profit_primary,
             )
         except Exception as exc:
-            print(f"⚠️ NYUPIP auto-trade error: {exc}")
+            self._log_status(f"⚠️ NYUPIP auto-trade error: {exc}")
             return
 
         if not trade:
@@ -1906,7 +2045,7 @@ class LiveDataStream:
 
         ticket = trade.get('ticket', 0)
         self.nyupip_state['auto_last_ticket'] = ticket
-        print(f"✅ [NYUPIP-{signal.module}] Auto order sent ticket={ticket} lots={trade.get('volume', 0.0)}")
+        self._log_trade(f"ORDER SENT [NYUPIP-{signal.module}]: ticket={ticket} lots={trade.get('volume', 0.0)} entry={trade.get('price', signal.entry_price):.2f} sl={signal.stop_loss:.2f} tp={signal.take_profit_primary:.2f}")
 
         if self.persistence:
             try:
@@ -1914,7 +2053,7 @@ class LiveDataStream:
                     'timestamp': signal.timestamp.isoformat(),
                     'symbol': self.symbol,
                     'direction': signal.direction,
-                    'entry': signal.entry_price,
+                    'entry': trade.get('price', signal.entry_price),
                     'sl': signal.stop_loss,
                     'tp': signal.take_profit_primary,
                     'lots': trade.get('volume', 0.0),
@@ -1925,7 +2064,7 @@ class LiveDataStream:
                     'engine': f'NYUPIP_{signal.module}'
                 })
             except Exception as exc:
-                print(f"⚠️ NYUPIP trade persist error: {exc}")
+                self._log_status(f"⚠️ NYUPIP trade persist error: {exc}")
 
         if self.order_manager:
             try:
@@ -1939,7 +2078,7 @@ class LiveDataStream:
                     tier='NYUPIP'
                 )
             except Exception as exc:
-                print(f"⚠️ Order manager NYUPIP error: {exc}")
+                self._log_status(f"⚠️ Order manager NYUPIP error: {exc}")
 
     def _process_ict_swing_signal(self, signal: ICTSwingSignal, spread_block: bool, atr_block: bool):
         payload = signal.to_payload()
@@ -1948,7 +2087,7 @@ class LiveDataStream:
             self.ict_swing_state['last_diagnostics'] = self.ict_swing_strategy.get_last_diagnostics()
 
         direction_txt = 'BUY' if signal.direction == 1 else 'SELL'
-        print(
+        self._log_status(
             f"🟠 [ICT Swing {signal.session}] {direction_txt} @ {signal.entry_price:.2f} | "
             f"SL {signal.stop_loss:.2f} | TP {signal.take_profit_primary:.2f} | RR {signal.risk_reward:.2f}"
         )
@@ -1988,7 +2127,7 @@ class LiveDataStream:
                     'potential_profit_tp3': None,
                 })
             except Exception as exc:
-                print(f"⚠️ ICT Swing persist error: {exc}")
+                self._log_status(f"⚠️ ICT Swing persist error: {exc}")
 
         can_trade = (
             self.autotrader
@@ -2029,11 +2168,11 @@ class LiveDataStream:
                 block_reasons.append("HIGH engine disabled")
             
             reason_str = " | ".join(block_reasons) if block_reasons else "Unknown reason"
-            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Signal generated but blocked | {reason_str}")
+            self._log_status(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Signal generated but blocked | {reason_str}")
             return
 
         if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
-            print(f"⏸️ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Halt new orders (daily loss cap reached)")
+            self._log_status(f"⏸️ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Halt new orders (daily loss cap reached)")
             return
 
         # Use a distinct campaign bucket for ICT Swing so it doesn't compete with ATM
@@ -2041,7 +2180,7 @@ class LiveDataStream:
         if self.campaign and not self.campaign.allow(self.symbol, signal.direction, swing_bucket):
             current_count = self.campaign.current_count(self.symbol, signal.direction, swing_bucket) if self.campaign else 0
             max_count = self.campaign.max_per_level.get(swing_bucket, self.campaign.max_per_level.get('HIGH', 9)) if self.campaign else 9
-            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Campaign limit reached ({current_count}/{max_count} {swing_bucket} trades in window)")
+            self._log_status(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing: Campaign limit reached ({current_count}/{max_count} {swing_bucket} trades in window)")
             return
 
         try:
@@ -2052,7 +2191,7 @@ class LiveDataStream:
                 signal.take_profit_primary,
             )
         except Exception as exc:
-            print(f"⚠️ ICT Swing auto-trade error: {exc}")
+            self._log_status(f"⚠️ ICT Swing auto-trade error: {exc}")
             return
 
         if not trade:
@@ -2060,7 +2199,7 @@ class LiveDataStream:
 
         ticket = trade.get('ticket', 0)
         self.ict_swing_state['auto_last_ticket'] = ticket
-        print(f"✅ [ICT Swing {signal.session}] Auto order sent ticket={ticket} lots={trade.get('volume', 0.0)}")
+        self._log_trade(f"ORDER SENT [ICT Swing {signal.session}]: ticket={ticket} lots={trade.get('volume', 0.0)} entry={trade.get('price', signal.entry_price):.2f} sl={signal.stop_loss:.2f} tp={signal.take_profit_primary:.2f}")
 
         if self.persistence:
             try:
@@ -2068,7 +2207,7 @@ class LiveDataStream:
                     'timestamp': payload['timestamp'],
                     'symbol': self.symbol,
                     'direction': signal.direction,
-                    'entry': signal.entry_price,
+                    'entry': trade.get('price', signal.entry_price),
                     'sl': signal.stop_loss,
                     'tp': signal.take_profit_primary,
                     'lots': trade.get('volume', 0.0),
@@ -2079,7 +2218,7 @@ class LiveDataStream:
                     'engine': 'ICT_SWING'
                 })
             except Exception as exc:
-                print(f"⚠️ ICT Swing trade persist error: {exc}")
+                self._log_status(f"⚠️ ICT Swing trade persist error: {exc}")
 
         if self.order_manager:
             try:
@@ -2093,7 +2232,7 @@ class LiveDataStream:
                     tier=signal.scenario,
                 )
             except Exception as exc:
-                print(f"⚠️ Order manager ICT Swing error: {exc}")
+                self._log_status(f"⚠️ Order manager ICT Swing error: {exc}")
         if self.campaign:
             self.campaign.record(self.symbol, signal.direction, swing_bucket)
 
@@ -2104,7 +2243,7 @@ class LiveDataStream:
             self.ict_atm_state['last_diagnostics'] = self.ict_atm_strategy.get_last_diagnostics()
 
         direction_txt = 'BUY' if signal.direction == 1 else 'SELL'
-        print(
+        self._log_status(
             f"🟣 [ICT ATM] {direction_txt} @ {signal.entry_price:.2f} | "
             f"SL {signal.stop_loss:.2f} | TP {signal.take_profit_primary:.2f} | RR {signal.risk_reward:.2f}"
         )
@@ -2144,7 +2283,7 @@ class LiveDataStream:
                     'potential_profit_tp3': None,
                 })
             except Exception as exc:
-                print(f"⚠️ ICT ATM persist error: {exc}")
+                self._log_status(f"⚠️ ICT ATM persist error: {exc}")
 
         can_trade = (
             self.autotrader
@@ -2185,11 +2324,11 @@ class LiveDataStream:
                 block_reasons.append("HIGH engine disabled")
             
             reason_str = " | ".join(block_reasons) if block_reasons else "Unknown reason"
-            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Signal generated but blocked | {reason_str}")
+            self._log_status(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Signal generated but blocked | {reason_str}")
             return
 
         if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
-            print(f"⏸️ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Halt new orders (daily loss cap reached)")
+            self._log_status(f"⏸️ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Halt new orders (daily loss cap reached)")
             return
 
         # Use a distinct campaign bucket for ICT ATM so it doesn't compete with Swing
@@ -2197,7 +2336,7 @@ class LiveDataStream:
         if self.campaign and not self.campaign.allow(self.symbol, signal.direction, atm_bucket):
             current_count = self.campaign.current_count(self.symbol, signal.direction, atm_bucket) if self.campaign else 0
             max_count = self.campaign.max_per_level.get(atm_bucket, self.campaign.max_per_level.get('HIGH', 9)) if self.campaign else 9
-            print(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Campaign limit reached ({current_count}/{max_count} {atm_bucket} trades in window)")
+            self._log_status(f"⛔ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM: Campaign limit reached ({current_count}/{max_count} {atm_bucket} trades in window)")
             return
 
         try:
@@ -2208,7 +2347,7 @@ class LiveDataStream:
                 signal.take_profit_primary,
             )
         except Exception as exc:
-            print(f"⚠️ ICT ATM auto-trade error: {exc}")
+            self._log_status(f"⚠️ ICT ATM auto-trade error: {exc}")
             return
 
         if not trade:
@@ -2216,7 +2355,7 @@ class LiveDataStream:
 
         ticket = trade.get('ticket', 0)
         self.ict_atm_state['auto_last_ticket'] = ticket
-        print(f"✅ [ICT ATM] Auto order sent ticket={ticket} lots={trade.get('volume', 0.0)}")
+        self._log_trade(f"ORDER SENT [ICT ATM]: ticket={ticket} lots={trade.get('volume', 0.0)} entry={trade.get('price', signal.entry_price):.2f} sl={signal.stop_loss:.2f} tp={signal.take_profit_primary:.2f}")
 
         if self.persistence:
             try:
@@ -2224,7 +2363,7 @@ class LiveDataStream:
                     'timestamp': payload['timestamp'],
                     'symbol': self.symbol,
                     'direction': signal.direction,
-                    'entry': signal.entry_price,
+                    'entry': trade.get('price', signal.entry_price),
                     'sl': signal.stop_loss,
                     'tp': signal.take_profit_primary,
                     'lots': trade.get('volume', 0.0),
@@ -2235,7 +2374,7 @@ class LiveDataStream:
                     'engine': 'ICT_ATM'
                 })
             except Exception as exc:
-                print(f"⚠️ ICT ATM trade persist error: {exc}")
+                self._log_status(f"⚠️ ICT ATM trade persist error: {exc}")
 
         if self.order_manager:
             try:
@@ -2249,7 +2388,7 @@ class LiveDataStream:
                     tier='ICT_ATM',
                 )
             except Exception as exc:
-                print(f"⚠️ Order manager ICT ATM error: {exc}")
+                self._log_status(f"⚠️ Order manager ICT ATM error: {exc}")
         if self.campaign:
             self.campaign.record(self.symbol, signal.direction, atm_bucket)
 

@@ -62,6 +62,9 @@ class NYUPIPStrategy:
         timezone: str = "Africa/Johannesburg",
         cooldown_minutes: int = 30,
         enable_rsi_confirmation: bool = False,
+        enforce_active_window: bool = True,
+        active_window_start: time = time(8, 0),
+        active_window_end: time = time(18, 0),
     ) -> None:
         self.symbol = symbol
         self.risk_percent = min(max(risk_percent, 0.0), max_risk_percent)
@@ -70,6 +73,9 @@ class NYUPIPStrategy:
         self.timezone = pytz.timezone(timezone)
         self.cooldown = timedelta(minutes=cooldown_minutes)
         self.enable_rsi_confirmation = enable_rsi_confirmation
+        self.enforce_active_window = bool(enforce_active_window)
+        self.active_window_start = active_window_start
+        self.active_window_end = active_window_end
         self._indicators = TechnicalIndicators()
         self._chop_detector = ChopDetector()  # Professor's fix: detect chop compressions
         self._last_signal_time: Dict[str, Optional[datetime]] = {"1HSMA": None, "CIS": None}
@@ -177,6 +183,7 @@ class NYUPIPStrategy:
             current_ts_raw = current_ts_raw.tz_localize("UTC")
         current_ts_sast = current_ts_raw.tz_convert(self.timezone)
         current_ts = current_ts_sast.tz_localize(None)
+        within_active_hours = self._is_within_active_window(current_ts_sast.to_pydatetime())
 
         h1 = self._resample_ohlc(data, "1h")
         m15 = self._resample_ohlc(data, "15min")
@@ -244,6 +251,7 @@ class NYUPIPStrategy:
             "zone_valid": bool(zone_valid),
             "atr_valid": bool(atr_valid),
             "trendline_valid": bool(trendline_valid),
+            "within_active_hours": bool(within_active_hours),
             "zone_distance": _to_float(zone_distance),
             "zone_threshold": _to_float(zone_threshold),
             "atr_current": _to_float(atr_current),
@@ -267,7 +275,19 @@ class NYUPIPStrategy:
             "zone_distance": zone_distance,
             "zone_threshold": zone_threshold,
             "trendline_valid": trendline_valid,
+            "within_active_hours": within_active_hours,
         }
+
+    def _is_within_active_window(self, now_local: datetime) -> bool:
+        """Return whether current local time is within configured NYUPIP active hours."""
+        if not self.enforce_active_window:
+            return True
+        now_minutes = now_local.hour * 60 + now_local.minute
+        start_minutes = self.active_window_start.hour * 60 + self.active_window_start.minute
+        end_minutes = self.active_window_end.hour * 60 + self.active_window_end.minute
+        if end_minutes >= start_minutes:
+            return start_minutes <= now_minutes <= end_minutes
+        return now_minutes >= start_minutes or now_minutes <= end_minutes
 
     @staticmethod
     def _resample_ohlc(data: pd.DataFrame, rule: str) -> Optional[pd.DataFrame]:
@@ -319,8 +339,13 @@ class NYUPIPStrategy:
             "zone_valid": bool(ctx.get("zone_valid")),
             "atr_valid": bool(ctx.get("atr_valid")),
             "trendline_valid": bool(ctx.get("trendline_valid")),
+            "within_active_hours": bool(ctx.get("within_active_hours")),
         }
         signals: List[NYUPIPSignal] = []
+
+        if not ctx.get("within_active_hours"):
+            diag["reason"] = "outside_active_hours"
+            return signals, diag
 
         trend_bias = ctx.get("trend_bias")
         if trend_bias not in {"LONG", "SHORT"}:
@@ -472,8 +497,13 @@ class NYUPIPStrategy:
             "reason": None,
             "trend_bias": ctx.get("trend_bias"),
             "atr_valid": bool(ctx.get("atr_valid")),
+            "within_active_hours": bool(ctx.get("within_active_hours")),
         }
         signals: List[NYUPIPSignal] = []
+
+        if not ctx.get("within_active_hours"):
+            diag["reason"] = "outside_active_hours"
+            return signals, diag
 
         trend_bias = ctx.get("trend_bias")
         if trend_bias not in {"LONG", "SHORT"}:

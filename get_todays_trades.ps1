@@ -40,6 +40,9 @@ Write-Host ""
 
 $totalProfit = 0
 $totalTrades = 0
+$totalClosed = 0
+$totalClosedWithPnl = 0
+$totalMissingPnl = 0
 
 foreach ($group in $byStrategy | Sort-Object Name) {
 
@@ -57,6 +60,7 @@ foreach ($group in $byStrategy | Sort-Object Name) {
         $profits = @()
         $wins = 0
         $losses = 0
+        $missingPnl = 0
         
         foreach ($trade in $closedTrades) {
             $pnl = $null
@@ -82,20 +86,30 @@ foreach ($group in $byStrategy | Sort-Object Name) {
                 $profits += $pnl
                 if ($pnl -gt 0) { $wins++ } elseif ($pnl -lt 0) { $losses++ }
             }
+            else {
+                $missingPnl++
+            }
         }
 
-        $totalPnL = ($profits | Measure-Object -Sum).Sum
+        $totalPnL = if ($profits.Count -gt 0) { ($profits | Measure-Object -Sum).Sum } else { 0 }
         $avgPnL   = if ($profits.Count -gt 0) { ($profits | Measure-Object -Average).Average } else { 0 }
-        $winRate  = if ($closedTrades.Count -gt 0) { [math]::Round(100 * $wins / $closedTrades.Count, 1) } else { 0 }
+        $resolvedClosed = $closedTrades.Count - $missingPnl
+        $winRate  = if ($resolvedClosed -gt 0) { [math]::Round(100 * $wins / $resolvedClosed, 1) } else { 0 }
 
         $color = if ($winRate -ge 50) { "Green" } else { "Red" }
-        Write-Host -ForegroundColor $color "   Closed: $($closedTrades.Count) | Wins: $wins | Losses: $losses | Win Rate: $winRate%"
+        Write-Host -ForegroundColor $color "   Closed: $($closedTrades.Count) | With P/L: $resolvedClosed | Wins: $wins | Losses: $losses | Win Rate: $winRate%"
+        if ($missingPnl -gt 0) {
+            Write-Host -ForegroundColor Yellow "   Warning: $missingPnl closed trade(s) missing close_price/pnl."
+        }
 
         $pnlColor = if ($totalPnL -ge 0) { "Green" } else { "Red" }
         Write-Host -ForegroundColor $pnlColor ("   Total PL: $" + [math]::Round($totalPnL, 2))
         Write-Host -ForegroundColor Gray ("   Avg PL: $" + [math]::Round($avgPnL, 2))
 
         $totalProfit += $totalPnL
+        $totalClosed += $closedTrades.Count
+        $totalClosedWithPnl += $resolvedClosed
+        $totalMissingPnl += $missingPnl
     }
 
     if ($openTrades.Count -gt 0) {
@@ -111,6 +125,12 @@ Write-Host -ForegroundColor Cyan "SUMMARY"
 Write-Host -ForegroundColor Cyan $divider
 
 Write-Host -ForegroundColor White "Total Trades Today: $totalTrades"
+if ($totalClosed -gt 0) {
+    Write-Host -ForegroundColor White "Closed Trades With P/L: $totalClosedWithPnl/$totalClosed"
+}
+if ($totalMissingPnl -gt 0) {
+    Write-Host -ForegroundColor Yellow "Warning: $totalMissingPnl closed trade(s) missing close data today."
+}
 $col = if ($totalProfit -ge 0) { "Green" } else { "Red" }
 Write-Host -ForegroundColor $col ("Total Profit Today: $" + [math]::Round($totalProfit, 2))
 Write-Host ""

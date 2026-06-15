@@ -107,12 +107,12 @@ class NewsCalendar:
             
             delta_minutes = (now - evt_time).total_seconds() / 60
             
-            # Within pre-buffer: approaching event
-            if 0 <= delta_minutes <= pre_minutes:
+            # Within pre-buffer: approaching event (event is in the future)
+            if -pre_minutes <= delta_minutes < 0:
                 return True, f"{evt.name}_APPROACHING"
             
-            # Within post-buffer: event just released
-            if -post_minutes <= delta_minutes < 0:
+            # Within post-buffer: event just released (event is in the past)
+            if 0 <= delta_minutes <= post_minutes:
                 return True, f"{evt.name}_RELEASED"
         
         return False, None

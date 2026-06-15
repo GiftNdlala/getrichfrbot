@@ -116,12 +116,15 @@ class OrderManager:
 
 	def register_new_order(self, ticket: int, direction: int, entry: float, sl: float, tp: float, alert_level: str, tier: Optional[str] = None):
 		self.managed[ticket] = ManagedOrder(ticket=ticket, open_time=datetime.utcnow(), entry=entry, sl=sl, tp=tp, direction=direction, alert_level=alert_level, tier=tier)
-		self.persistence.update_trade(ticket, {
-			'open_time': datetime.utcnow().isoformat(),
-			'status': 'OPEN',
-			'alert_level': alert_level,
-			'tier': tier or ''
-		})
+		try:
+			self.persistence.update_trade(ticket, {
+				'open_time': datetime.utcnow().isoformat(),
+				'status': 'OPEN',
+				'alert_level': alert_level,
+				'tier': tier or ''
+			})
+		except Exception as e:
+			print(f"ORDER TRACKING WARNING: ticket={ticket} persistence_update_failed={e}", flush=True)
 
 	def reconcile(self):
 		"""Poll MT5 and update statuses; apply exit rules"""
@@ -155,21 +158,29 @@ class OrderManager:
 					if not deals:
 						deals = self.mt5.get_orders_history(count=500)
 					
-					# Find the exit deal for this position (deal_type 1 = exit, 0 = entry)
+					def _deal_ts(deal):
+						ts_msc = getattr(deal, 'time_msc', None)
+						if ts_msc not in (None, 0):
+							return int(ts_msc)
+						ts = getattr(deal, 'time', None)
+						return int(ts) * 1000 if ts not in (None, 0) else 0
+
+					# Find the most recent exit deal for this position.
+					# MT5 uses `entry` (IN/OUT) to classify close legs.
 					closing_deal = None
 					for d in deals or []:
-						# Check position field (not position_id) and deal type
 						pos = getattr(d, 'position', None)
-						deal_type = getattr(d, 'type', None)
-						
-						if pos != ticket:
+						if pos is None:
+							pos = getattr(d, 'position_id', None)
+						if pos is not None and int(pos) != int(ticket):
 							continue
-						
-						# Look for exit deal (type 1) or just the latest deal
-						if deal_type == 1:  # Exit deal
-							if not closing_deal or getattr(d, 'time', 0) >= getattr(closing_deal, 'time', 0):
+
+						deal_entry = getattr(d, 'entry', None)
+						is_exit = deal_entry in (1, 3)  # DEAL_ENTRY_OUT / DEAL_ENTRY_OUT_BY
+						if is_exit:
+							if not closing_deal or _deal_ts(d) >= _deal_ts(closing_deal):
 								closing_deal = d
-						elif not closing_deal:  # Fallback to any deal
+						elif not closing_deal:
 							closing_deal = d
 					
 					if closing_deal:
@@ -195,7 +206,14 @@ class OrderManager:
 					payload['close_time'] = close_time_iso
 				if pnl is not None:
 					payload['pnl'] = pnl
-				self.persistence.update_trade(ticket, payload)
+				direction = 'BUY' if state.direction == 1 else 'SELL'
+				close_text = f"{close_price:.2f}" if close_price is not None and close_price > 0 else "unknown"
+				pnl_text = f"{pnl:.2f}" if pnl is not None else "unknown"
+				print(f"ORDER CLOSED: ticket={ticket} direction={direction} close={close_text} pnl={pnl_text}", flush=True)
+				try:
+					self.persistence.update_trade(ticket, payload)
+				except Exception as e:
+					print(f"ORDER CLOSE PERSIST WARNING: ticket={ticket} error={e}", flush=True)
 				self.managed.pop(ticket, None)
 		# Apply rules for open positions
 		for p in positions:
@@ -232,11 +250,16 @@ class OrderManager:
 			# Time-based exit with loss minimizer
 			if age >= max_age:
 				if not self._try_loss_minimizer(pos, st):
-					self.autotrader.close_position(st.ticket)
-					self.persistence.update_trade(st.ticket, {
-						'status': 'CLOSED',
-						'reason': 'TIME'
-					})
+					print(f"ORDER CLOSING [TIME]: ticket={st.ticket} age_minutes={age.total_seconds() / 60:.1f}", flush=True)
+					closed = self.autotrader.close_position(st.ticket)
+					print(f"ORDER CLOSE REQUEST {'SENT' if closed else 'FAILED'} [TIME]: ticket={st.ticket}", flush=True)
+					try:
+						self.persistence.update_trade(st.ticket, {
+							'status': 'CLOSED',
+							'reason': 'TIME'
+						})
+					except Exception as e:
+						print(f"ORDER CLOSE PERSIST WARNING: ticket={st.ticket} error={e}", flush=True)
 					self.managed.pop(st.ticket, None)
 		except Exception:
 			return
