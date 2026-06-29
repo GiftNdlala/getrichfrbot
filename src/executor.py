@@ -175,11 +175,20 @@ class AutoTrader:
 		}
 		result = mt5.order_send(request)
 		if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+			print(
+				f"ORDER OPEN SENT [DONE]: ticket={result.order} symbol={self.symbol} volume={lots} open_price={getattr(result,'price', None)} sl={sl} tp={tp}",
+				flush=True
+			)
 			return {
 				"ticket": result.order,
 				"volume": lots,
 				"price": result.price,
 			}
+		# Failed open attempt
+		print(
+			f"ORDER OPEN SENT [FAILED]: symbol={self.symbol} volume={lots} open_price={entry} sl={sl} tp={tp} retcode={getattr(result,'retcode', None)}",
+			flush=True
+		)
 		return None
 
 	def modify_sl_tp(self, ticket: int, new_sl: Optional[float] = None, new_tp: Optional[float] = None) -> bool:
@@ -205,11 +214,14 @@ class AutoTrader:
 
 	def close_position(self, ticket: int) -> bool:
 		if mt5 is None:
+			print(f"ORDER CLOSE FAILED [mt5_not_available]: ticket={ticket}", flush=True)
 			return False
 		try:
 			pos = next((p for p in mt5.positions_get() or [] if p.ticket == ticket), None)
 			if not pos:
+				print(f"ORDER CLOSE FAILED [position_not_found]: ticket={ticket}", flush=True)
 				return False
+
 			price = None
 			order_type = None
 			if pos.type == mt5.POSITION_TYPE_BUY:
@@ -218,6 +230,7 @@ class AutoTrader:
 			else:
 				order_type = mt5.ORDER_TYPE_BUY
 				price = mt5.symbol_info_tick(pos.symbol).ask
+
 			request = {
 				"action": mt5.TRADE_ACTION_DEAL,
 				"symbol": pos.symbol,
@@ -229,7 +242,22 @@ class AutoTrader:
 				"magic": 20250923,
 				"comment": "Close position",
 			}
+
 			result = mt5.order_send(request)
-			return bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
-		except Exception:
+			ok = bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
+
+			if ok:
+				print(
+					f"ORDER CLOSE SENT [DONE]: ticket={ticket} symbol={pos.symbol} volume={pos.volume} close_price={getattr(result,'price', None)}",
+					flush=True
+				)
+			else:
+				print(
+					f"ORDER CLOSE SENT [FAILED]: ticket={ticket} symbol={pos.symbol} volume={pos.volume} retcode={getattr(result,'retcode', None)}",
+					flush=True
+				)
+
+			return ok
+		except Exception as e:
+			print(f"ORDER CLOSE FAILED [exception]: ticket={ticket} error={e}", flush=True)
 			return False

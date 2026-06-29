@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "Parent Mobile",
+    "slug": "parent-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": ["ios", "android", "web"],
+    "userInterfaceStyle": "dark"
+  }
+}
