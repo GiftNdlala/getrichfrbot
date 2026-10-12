@@ -157,10 +157,6 @@ class LiveDataStream:
         self.config = get_config()
         self.console_log_mode = str(self.config.get('console_log_mode', 'trades')).lower()
         
-        # Signal commitment / cooldown settings
-        self.min_bars_between_direction_flips = int(self.config.get('min_bars_between_direction_flips', 10))
-        self.last_committed_direction = None  # -1, 0, 1
-        self.bars_since_last_commit = 9999
         # Resolve data mapping once for transparency/debug
         try:
             self.yf_symbol = self._map_symbol_to_yfinance()
@@ -196,11 +192,18 @@ class LiveDataStream:
         self.current_signal = None
         self.last_update = None
         self.is_running = False
-        self.trading_enabled = False  # Default: OFF - user must enable manually
+        self.stream_thread = None
+        self._stream_lock = threading.RLock()
+        self._stream_generation = 0
+        self._stop_event = threading.Event()
         self.persistence = PersistenceManager() if PersistenceManager else None
         self.autotrader = AutoTrader(symbol=self.symbol) if AutoTrader else None
         # Managers
         exec_cfg = self.config.get('execution', {})
+        # Trading must be armed explicitly from the dashboard for each symbol.
+        # `execution.enabled` controls whether the order executor is available;
+        # it must not silently arm every stream at application startup.
+        self.trading_enabled = False
         window_min = int(exec_cfg.get('campaign_window_minutes', 10))
         max_map = exec_cfg.get('campaign_max_trades', { 'LOW': 6, 'MEDIUM': 6, 'HIGH': 9 })
         min_spacing = int(exec_cfg.get('min_seconds_between_entries', 60))
@@ -236,14 +239,13 @@ class LiveDataStream:
         try:
             if self.mt5:
                 self.mt5.symbol = self.symbol
-                import MetaTrader5 as mt5
-                mt5.symbol_select(self.symbol, True)
-                # Re-initialize after symbol override so connector keeps it
+                # The connector serializes symbol selection with the shared MT5
+                # session; do not call the MT5 module directly from this thread.
                 self.mt5.initialize()
         except Exception:
             pass
-        # Global engine mode - Default: NONE - user must manually select a mode
-        self.engine_mode = 'NONE'
+        # Global engine mode - Default: ALL so enabled signal switches can trade immediately
+        self.engine_mode = 'ALL'
         
         # Callbacks for signal updates
         self.signal_callbacks = []
@@ -266,7 +268,15 @@ class LiveDataStream:
         # NYUPIP strategy integration
         tz_name = self.config.get('sessions', {}).get('timezone', 'UTC')
 
-        self.nyupip_strategy = NYUPIPStrategy(symbol=self.symbol, timezone=tz_name)
+        strategy_guards = self.config.get('strategy_guards', {}) or {}
+        self.nyupip_strategy = NYUPIPStrategy(
+            symbol=self.symbol,
+            timezone=tz_name,
+            enforce_active_window=bool(strategy_guards.get('nyupip_active_window_enabled', False)),
+        )
+        self.nyupip_extra_order_gate_enabled = bool(
+            strategy_guards.get('nyupip_extra_order_gate_enabled', False)
+        )
         self.nyupip_enabled = False
         self.nyupip_state: Dict[str, object] = {
             'enabled': False,
@@ -1181,13 +1191,32 @@ class LiveDataStream:
     
     def start_streaming(self):
         """Start the live data streaming"""
-        self.is_running = True
+        with self._stream_lock:
+            if self.stream_thread and self.stream_thread.is_alive() and self.is_running:
+                return
+
+            # A stopped worker may still be waiting between polling cycles.
+            # Wake it and wait briefly before creating a replacement worker.
+            if self.stream_thread and self.stream_thread.is_alive():
+                self.is_running = False
+                self._stop_event.set()
+                self.stream_thread.join(timeout=max(2.0, min(self.update_interval + 2.0, 15.0)))
+
+            self._stream_generation += 1
+            generation = self._stream_generation
+            stop_event = threading.Event()
+            self._stop_event = stop_event
+            self.is_running = True
         
         def stream_loop():
             self._log_status(f"🚀 Starting live data stream for {self.symbol}")
             self._log_status(f"⏱️ Update interval: {self.update_interval} seconds")
             
-            while self.is_running:
+            while (
+                self.is_running
+                and not stop_event.is_set()
+                and generation == self._stream_generation
+            ):
                 try:
                     # Fetch current quote
                     current_quote = self._fetch_current_quote()
@@ -1206,33 +1235,19 @@ class LiveDataStream:
                                 spread_points = float(spread_points)
                                 self._latest_spread_points = spread_points
 
-                                # Feed rolling spread history used by master gates.
+                                # Keep a rolling spread history for diagnostics, but honour the
+                                # configured hard cap as the sole execution blocker.
                                 if self.spread_analyzer:
                                     self.spread_analyzer.record(spread_points)
                                     spread_ok, spread_reason = self.spread_analyzer.check_spread(spread_points)
                                     if not spread_ok:
-                                        spread_block = True
-                                        self._log_status(f"⛔ Spread guard (rolling 30m): {spread_reason}")
+                                        self._log_status(f"ℹ️ Spread diagnostic (rolling 30m): {spread_reason}")
 
-                                if (
-                                    not spread_block
-                                    and (
-                                        self.spread_analyzer is None
-                                        or len(self.spread_analyzer.spread_history) < 20
+                                if spread_points > max_spread:
+                                    spread_block = True
+                                    self._log_trade(
+                                        f"TRADE BLOCKED [SPREAD]: symbol={self.symbol} spread_points={spread_points:.1f} cap={max_spread:.1f} source={current_quote.get('source', 'unknown')}"
                                     )
-                                ):
-                                    bootstrap_cap = max_spread
-                                    if self.spread_analyzer and len(self.spread_analyzer.spread_history) >= 5:
-                                        recent_spreads = [s for _, s in self.spread_analyzer.spread_history]
-                                        seed_median = float(np.median(recent_spreads))
-                                        # Adaptive bootstrap cap:
-                                        # keep configured floor, but allow brokers with wider normal point spreads.
-                                        bootstrap_cap = max(max_spread, seed_median * 2.5)
-                                    if spread_points > bootstrap_cap:
-                                        spread_block = True
-                                        self._log_status(
-                                            f"⛔ Spread guard (bootstrap cap): {spread_points:.1f} > {bootstrap_cap:.1f}"
-                                        )
 
                                 if self.order_manager:
                                     try:
@@ -1244,30 +1259,14 @@ class LiveDataStream:
                                         pass
                             atr_block = latest_atr < min_atr_pips
                             if atr_block:
-                                self._log_status(f"⛔ ATR guard: ATR_14 {latest_atr:.2f} < {min_atr_pips}")
+                                self._log_trade(
+                                    f"TRADE BLOCKED [ATR]: symbol={self.symbol} atr_14={latest_atr:.2f} minimum={min_atr_pips:.2f}"
+                                )
                         except Exception:
                             spread_block = False
                             atr_block = False
                         # Update historical data
                         self._update_historical_data(current_quote)
-
-                        # Increment bar counter (used for direction-flip cooldown)
-                        try:
-                            self.bars_since_last_commit += 1
-                        except Exception:
-                            self.bars_since_last_commit = 9999
-
-                        # If spread guard is active, skip signal generation entirely
-                        if spread_block:
-                            self._log_status(f"⛔ Spread block active; skipping signal generation for this tick ({current_quote.get('spread_points')})")
-                            # Do not generate signals or persist them to avoid polluting signal stats
-                            # Sleep here to respect the configured update interval and avoid
-                            # tight loops when the spread guard is repeatedly triggered.
-                            try:
-                                time.sleep(self.update_interval)
-                            except Exception:
-                                pass
-                            continue
 
                         # Generate signal
                         live_signal = self._generate_live_signal(current_quote)
@@ -1275,36 +1274,6 @@ class LiveDataStream:
                         # Store current signal
                         self.current_signal = live_signal
                         self.last_update = datetime.now()
-
-                        # Apply minimum-bars cooldown for direction flips
-                        try:
-                            current_dir = int(live_signal.signal)
-                        except Exception:
-                            current_dir = 0
-
-                        if current_dir == 0:
-                            # no directional signal — let the bars counter continue
-                            pass
-                        else:
-                            if self.last_committed_direction is None:
-                                # first committed direction
-                                self.last_committed_direction = current_dir
-                                self.bars_since_last_commit = 0
-                            elif current_dir == self.last_committed_direction:
-                                # continuing same direction — reset counter
-                                self.bars_since_last_commit = 0
-                            else:
-                                # direction flip detected
-                                if self.bars_since_last_commit < self.min_bars_between_direction_flips:
-                                    self._log_status(f"⛔ Cooldown: flip {self.last_committed_direction}→{current_dir} ignored ({self.bars_since_last_commit}<{self.min_bars_between_direction_flips})")
-                                    # Mute the flip to avoid churn: convert to HOLD
-                                    live_signal.signal = 0
-                                    live_signal.signal_type = "COOLDOWN"
-                                    live_signal.confidence = min(live_signal.confidence, 50.0)
-                                else:
-                                    # allow flip
-                                    self.last_committed_direction = current_dir
-                                    self.bars_since_last_commit = 0
 
                         # Persist signal
                         if self.persistence:
@@ -1333,7 +1302,13 @@ class LiveDataStream:
                                     entry = idea['entry']
                                     sl = idea['sl']
                                     tp = idea['tp']
-                                    trade = self.autotrader.place_market_order(side, entry, sl, tp)
+                                    trade = self.autotrader.place_market_order(
+                                        side,
+                                        entry,
+                                        sl,
+                                        tp,
+                                        strategy_tag="EVENT"
+                                    )
                                     if trade:
                                         self._log_trade(f"ORDER SENT [EVENT]: ticket={trade.get('ticket')} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={tp:.2f}")
                                         if self.order_manager:
@@ -1411,9 +1386,9 @@ class LiveDataStream:
                                     # These are designed to trade less, but cleaner.
                                     try:
                                         qcfg = (self.config.get('filters', {}) or {}).get('quality_gates', {}) or {}
-                                        enable_qg = bool(qcfg.get('enabled', True))
+                                        enable_qg = bool(qcfg.get('enabled', False))
                                     except Exception:
-                                        enable_qg = True
+                                        enable_qg = False
                                         qcfg = {}
 
                                     if enable_qg and level in {'HIGH', 'MEDIUM'}:
@@ -1489,9 +1464,17 @@ class LiveDataStream:
                                                 local_tp = tp_absolute
                                             elif tp_pips_override is not None:
                                                 local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
-                                            trade = self.autotrader.place_market_order(side, entry, sl, local_tp)
+                                            trade = self.autotrader.place_market_order(
+                                                side,
+                                                entry,
+                                                sl,
+                                                local_tp,
+                                                strategy_tag=f"{engine}:{level}:{tier_name or 'BASE'}"
+                                            )
                                             if trade:
                                                 self._log_trade(f"ORDER SENT [{engine}]: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={local_tp:.2f}")
+                                            else:
+                                                self._log_trade(f"ORDER FAILED [{engine}]: level={level} tier={tier_name or 'BASE'} symbol={self.symbol}; see MT5 error above")
                                             if trade and self.persistence:
                                                 try:
                                                     self.persistence.save_trade({
@@ -1569,7 +1552,13 @@ class LiveDataStream:
                                             entry = live_signal.entry_price
                                             sl = entry - sl_pips if side == 1 else entry + sl_pips
                                             tp_small = entry + tp_pips if side == 1 else entry - tp_pips
-                                            trade = self.autotrader.place_market_order(side, entry, sl, tp_small)
+                                            trade = self.autotrader.place_market_order(
+                                                side,
+                                                entry,
+                                                sl,
+                                                tp_small,
+                                                strategy_tag=f"FARMER:{level}"
+                                            )
                                             if trade:
                                                 self._log_trade(f"ORDER SENT [FARMER]: ticket={trade.get('ticket')} lots={trade.get('volume')} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={tp_small:.2f}")
                                             if trade and self.persistence:
@@ -1597,8 +1586,8 @@ class LiveDataStream:
                                                     self._log_status(f"Order manager FARMER error: {e}")
                                             if trade and self.campaign:
                                                 self.campaign.record(self.symbol, side, 'HIGH')
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                self._log_trade(f"FARMER ERROR: symbol={self.symbol} error={e}")
 
                         if self.nyupip_enabled:
                             try:
@@ -1741,16 +1730,25 @@ class LiveDataStream:
                 except Exception:
                     pass
                 # Wait for next update
-                time.sleep(self.update_interval)
+                stop_event.wait(self.update_interval)
         
         # Start streaming in background thread
-        self.stream_thread = threading.Thread(target=stream_loop, daemon=True)
+        self.stream_thread = threading.Thread(
+            target=stream_loop,
+            name=f"live-stream-{self.symbol}",
+            daemon=True,
+        )
         self.stream_thread.start()
     
     def stop_streaming(self):
         """Stop the live data streaming"""
-        self.is_running = False
+        with self._stream_lock:
+            self.is_running = False
+            self._stop_event.set()
+            worker = self.stream_thread
         self._log_status("🛑 Live data streaming stopped")
+        if worker and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=max(2.0, min(self.update_interval + 2.0, 15.0)))
     
     def get_current_signal(self) -> Optional[LiveSignal]:
         """Get the current live signal"""
@@ -1768,6 +1766,7 @@ class LiveDataStream:
                 next_in = max(0, self.farmer_cycle_seconds - int(elapsed))
         return {
             'is_running': self.is_running,
+            'worker_alive': bool(self.stream_thread and self.stream_thread.is_alive()),
             'last_update': self.last_update.isoformat() if self.last_update else None,
             'symbol': self.symbol,
             'update_interval': self.update_interval,
@@ -1800,6 +1799,11 @@ class LiveDataStream:
             self.enable_medium = bool(enabled)
         elif lv == 'HIGH':
             self.enable_high = bool(enabled)
+
+        # Safety net: if the user is enabling a level while the engine is still parked in NONE,
+        # automatically promote the mode to ALL so the dashboard toggles behave the way operators expect.
+        if enabled and self.engine_mode == 'NONE':
+            self.engine_mode = 'ALL'
 
     def set_event_mode(self, enabled: bool):
         self.event_mode_enabled = bool(enabled)
@@ -1959,7 +1963,7 @@ class LiveDataStream:
 
         order_gate_reason = None
         daily_halt_active = bool(self.order_manager and getattr(self.order_manager, 'halt_new_orders', False))
-        if self.order_manager:
+        if self.order_manager and self.nyupip_extra_order_gate_enabled:
             try:
                 spread_points = 0.0
                 if current_quote and current_quote.get('spread_points') is not None:
@@ -2035,6 +2039,7 @@ class LiveDataStream:
                 signal.entry_price,
                 signal.stop_loss,
                 signal.take_profit_primary,
+                strategy_tag=f"NYUPIP-{signal.module}"
             )
         except Exception as exc:
             self._log_status(f"⚠️ NYUPIP auto-trade error: {exc}")
@@ -2189,6 +2194,7 @@ class LiveDataStream:
                 signal.entry_price,
                 signal.stop_loss,
                 signal.take_profit_primary,
+                strategy_tag=f"ICT_SWING-{signal.session}"
             )
         except Exception as exc:
             self._log_status(f"⚠️ ICT Swing auto-trade error: {exc}")
@@ -2345,6 +2351,7 @@ class LiveDataStream:
                 signal.entry_price,
                 signal.stop_loss,
                 signal.take_profit_primary,
+                strategy_tag="ICT_ATM"
             )
         except Exception as exc:
             self._log_status(f"⚠️ ICT ATM auto-trade error: {exc}")

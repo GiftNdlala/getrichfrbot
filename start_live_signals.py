@@ -1,104 +1,12 @@
 #!/usr/bin/env python3
-"""
-XAUUSD Live Trading Signals - Startup Script
-Easy way to start the live signal dashboard
-"""
+"""Backward-compatible launcher for the Windows production runtime."""
 
-import os
-import sys
-import subprocess
-import time
-from datetime import datetime
+from run_bot_windows import main
 
-def check_requirements():
-    """Check if all required packages are installed"""
-    try:
-        import flask
-        import yfinance
-        import pandas
-        import numpy
-        print("✅ All required packages found")
-        return True
-    except ImportError as e:
-        print(f"❌ Missing required package: {e}")
-        print("📦 Installing requirements...")
-        try:
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
-            print("✅ Requirements installed successfully")
-            return True
-        except subprocess.CalledProcessError:
-            print("❌ Failed to install requirements")
-            return False
 
 def start_live_dashboard():
-    """Start the live trading signals dashboard"""
-    print("="*60)
-    print("🥇 XAUUSD LIVE TRADING SIGNALS DASHBOARD")
-    print("="*60)
-    print(f"📅 Starting at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
-    
-    # Check requirements
-    if not check_requirements():
-        print("❌ Cannot start dashboard due to missing requirements")
-        return
-    
-    print("🚀 Starting live signal system...")
-    print()
-    print("📊 What you'll get:")
-    print("   ✅ Real-time XAUUSD price updates (every 30 seconds)")
-    print("   ✅ Live BUY/SELL/HOLD signals") 
-    print("   ✅ Signal confidence percentage")
-    print("   ✅ Key technical indicators (RSI, MACD, SMAs)")
-    print("   ✅ Mobile-friendly web interface")
-    print()
-    print("🌐 Dashboard will be available at:")
-    print("   📱 http://localhost:5000")
-    print("   🖥️  http://127.0.0.1:5000")
-    print()
-    print("💡 Usage:")
-    print("   1. Open the URL in your browser/phone")
-    print("   2. Watch for BUY/SELL signals")
-    print("   3. Trade manually on your demo account")
-    print("   4. Press Ctrl+C here to stop")
-    print()
-    print("-"*60)
-    
-    try:
-        # Add current directory to Python path
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        if current_dir not in sys.path:
-            sys.path.insert(0, current_dir)
-        
-        # Import and start dashboard
-        from live_dashboard import app, init_live_stream, ensure_professional_template
-        
-        print("🔧 Setting up professional dashboard...")
-        ensure_professional_template()
-        
-        print("📡 Initializing live data stream with REAL market data...")
-        init_live_stream()
-        
-        print("✅ Starting web server...")
-        print("🎯 Dashboard ready! Open http://localhost:5000")
-        print()
-        
-        # Start Flask app
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
-        
-    except KeyboardInterrupt:
-        print()
-        print("🛑 Dashboard stopped by user")
-    except Exception as e:
-        print(f"❌ Error starting dashboard: {e}")
-        print()
-        print("🔍 Troubleshooting:")
-        print("   1. Make sure you're in the project directory")
-        print("   2. Check that all files are present")
-        print("   3. Try: python -m pip install -r requirements.txt")
-    
-    print()
-    print("👋 Thanks for using XAUUSD Live Signals!")
+    main()
+
 
 if __name__ == "__main__":
     start_live_dashboard()

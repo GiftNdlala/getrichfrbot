@@ -62,7 +62,7 @@ class NYUPIPStrategy:
         timezone: str = "Africa/Johannesburg",
         cooldown_minutes: int = 30,
         enable_rsi_confirmation: bool = False,
-        enforce_active_window: bool = True,
+        enforce_active_window: bool = False,
         active_window_start: time = time(8, 0),
         active_window_end: time = time(18, 0),
     ) -> None:

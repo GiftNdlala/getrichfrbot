@@ -604,8 +604,8 @@
                 <button id="btn-ict-swing-toggle" data-enabled="false" style="padding:10px 16px; border-radius:8px; border:none; background:#9E9E9E; color:#fff; font-weight:600; cursor:pointer;">ICT Swing: Off</button>
                 <button id="btn-ict-atm-toggle" data-enabled="false" style="padding:10px 16px; border-radius:8px; border:none; background:#9E9E9E; color:#fff; font-weight:600; cursor:pointer;">ICT ATM: Off</button>
                 <select id="engine-mode" style="padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); color:white;">
-                    <option value="NONE" selected>Mode: NONE</option>
-                    <option value="ALL">Mode: ALL</option>
+                    <option value="NONE">Mode: NONE</option>
+                    <option value="ALL" selected>Mode: ALL</option>
                     <option value="FARMER_ONLY">Farmer Only</option>
                     <option value="LOW_ONLY">LOW Only</option>
                     <option value="MEDIUM_ONLY">MEDIUM Only</option>
@@ -1368,8 +1368,12 @@
             if (e.target && (e.target.id === 'btn-xau-stream-toggle' || e.target.id === 'btn-us30-stream-toggle')) {
                 const btn = e.target;
                 const symbol = btn.dataset.symbol;
-                const currentlyEnabled = btn.dataset.enabled === 'true';
                 try {
+                    // Read the live backend state first: button markup starts as a
+                    // placeholder and must never decide whether to invert trading.
+                    const statusResponse = await fetch(`/api/status?symbol=${encodeURIComponent(symbol)}`);
+                    const status = await statusResponse.json();
+                    const currentlyEnabled = !!status.trading_enabled;
                     await fetch('/api/trading_toggle', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1381,47 +1385,47 @@
             if (e.target && e.target.id === 'btn-farmer-toggle') {
                 const enabled = e.target.textContent.includes('Off');
                 try {
-                    const res = await fetch('/api/farmer_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) });
+                    const res = await fetch('/api/farmer_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, enabled }) });
                     const st = await res.json();
                     updateFarmerBadge(st);
                 } catch {}
             }
             if (e.target && e.target.id === 'btn-low-toggle') {
                 const enabled = e.target.textContent.endsWith('Off');
-                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ level:'LOW', enabled }) }); } catch {}
+                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, level:'LOW', enabled }) }); } catch {}
                 fetchStatusOnly();
             }
             if (e.target && e.target.id === 'btn-med-toggle') {
                 const enabled = e.target.textContent.endsWith('Off');
-                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ level:'MEDIUM', enabled }) }); } catch {}
+                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, level:'MEDIUM', enabled }) }); } catch {}
                 fetchStatusOnly();
             }
             if (e.target && e.target.id === 'btn-high-toggle') {
                 const enabled = e.target.textContent.endsWith('Off');
-                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ level:'HIGH', enabled }) }); } catch {}
+                try { await fetch('/api/engine_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, level:'HIGH', enabled }) }); } catch {}
                 fetchStatusOnly();
             }
             if (e.target && e.target.id === 'btn-event-toggle') {
                 const enabled = e.target.textContent.endsWith('Off');
-                try { await fetch('/api/event_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
+                try { await fetch('/api/event_toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, enabled }) }); } catch {}
                 fetchStatusOnly();
             }
             if (e.target && e.target.id === 'btn-nyupip-toggle') {
                 const btn = e.target;
                 const enabled = btn.dataset.enabled !== 'true';
-                try { await fetch('/api/nyupip/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
+                try { await fetch('/api/nyupip/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, enabled }) }); } catch {}
                 fetchStatusOnly();
             }
             if (e.target && e.target.id === 'btn-ict-swing-toggle') {
                 const btn = e.target;
                 const enabled = btn.dataset.enabled !== 'true';
-                try { await fetch('/api/ict_swing/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
+                try { await fetch('/api/ict_swing/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, enabled }) }); } catch {}
                 fetchStatusOnly();
             }
             if (e.target && e.target.id === 'btn-ict-atm-toggle') {
                 const btn = e.target;
                 const enabled = btn.dataset.enabled !== 'true';
-                try { await fetch('/api/ict_atm/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) }); } catch {}
+                try { await fetch('/api/ict_atm/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ symbol: window.primarySymbol, enabled }) }); } catch {}
                 fetchStatusOnly();
             }
             // Kill Switches

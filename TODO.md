@@ -1,0 +1,4 @@
+- [ ] Disable signal spam prints in live_dashboard.py (default off; dashboard still updates)
+- [ ] Add strategy_tag into MT5 order comment + include it in ORDER OPEN SENT logs
+- [ ] Propagate strategy/engine tags from src/live_data_stream.py into all place_market_order calls (EVENT/INTRADAY tiers/FARMER/NYUPIP/ICT Swing/ICT ATM)
+- [ ] Sanity check: run py_compile on modified files

@@ -6,6 +6,7 @@ Created by Gift Ndlala
 
 from flask import Flask, render_template, jsonify, request
 from dataclasses import asdict
+import logging
 import threading
 import time
 import json
@@ -26,6 +27,7 @@ app = Flask(__name__)
 
 # Global variables
 streams = {}
+streams_lock = threading.RLock()
 current_signal_data = None
 signal_history = []
 persistence = PersistenceManager()
@@ -35,10 +37,48 @@ auto_take_profit = {
     'threshold': 30.0  # Default threshold
 }
 auto_tp_lock = threading.Lock()
+auto_tp_stop = threading.Event()
+auto_tp_thread = None
+
+
+def _requested_symbol(payload=None):
+    """Read a symbol consistently from JSON, query string, or the configured default."""
+    payload = payload or {}
+    return (
+        payload.get('symbol')
+        or request.args.get('symbol')
+        or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    )
+
+
+def configure_dashboard_logging() -> bool:
+    """Control whether Flask request/access logs are shown in the terminal."""
+    cfg = get_config()
+    enabled = bool(cfg.get('logging', {}).get('dashboard_access_logs', False))
+
+    werkzeug_logger = logging.getLogger('werkzeug')
+    app_logger = logging.getLogger('flask.app')
+    if enabled:
+        werkzeug_logger.setLevel(logging.INFO)
+        app_logger.setLevel(logging.INFO)
+        print("📝 Dashboard access logs: ENABLED")
+    else:
+        werkzeug_logger.setLevel(logging.ERROR)
+        app_logger.setLevel(logging.ERROR)
+        print("🔇 Dashboard access logs: DISABLED")
+    return enabled
 
 def init_live_stream():
     """Initialize live data streams for configured symbols"""
     global streams
+
+    # The dashboard can be started by a service manager, a local operator, or
+    # the resume endpoint.  Make startup idempotent so one process cannot
+    # accidentally create two workers for the same symbol.
+    with streams_lock:
+        if any(stream.is_running for stream in streams.values()):
+            return streams
+        streams.clear()
     
     def signal_callback(signal: LiveSignal):
         global current_signal_data, signal_history
@@ -99,11 +139,17 @@ def init_live_stream():
         if len(signal_history) > 10:
             signal_history.pop(0)
         
-        # Print signal update with alert categorization
+        # Print signal update with alert categorization (disabled by default; dashboard still updates)
         if signal.signal != 0:
-            alert_emoji = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}.get(signal.alert_level, '⭕')
-            print(f"🎯 {signal.signal_type} SIGNAL: ${signal.current_price:.2f} | {alert_emoji} {signal.alert_level} ALERT")
-            print(f"   Target: {signal.target_pips} pips | Success Rate: {signal.success_rate:.1f}% | Confidence: {signal.confidence:.1f}%")
+            try:
+                print_signal_alerts = os.getenv("PRINT_SIGNAL_ALERTS", "0").strip().lower() in {"1", "true", "yes", "on"}
+            except Exception:
+                print_signal_alerts = False
+
+            if print_signal_alerts:
+                alert_emoji = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}.get(signal.alert_level, '⭕')
+                print(f"🎯 {signal.signal_type} SIGNAL: ${signal.current_price:.2f} | {alert_emoji} {signal.alert_level} ALERT")
+                print(f"   Target: {signal.target_pips} pips | Success Rate: {signal.success_rate:.1f}% | Confidence: {signal.confidence:.1f}%")
     
     # Create and start live stream with REAL market data
     cfg = get_config()
@@ -112,7 +158,8 @@ def init_live_stream():
     gold_stream = LiveDataStream(symbol=symbol, update_interval=30)
     gold_stream.add_signal_callback(signal_callback)
     gold_stream.start_streaming()
-    streams[symbol] = gold_stream
+    with streams_lock:
+        streams[symbol] = gold_stream
 
     # Start US30m secondary stream
     try:
@@ -120,7 +167,8 @@ def init_live_stream():
         us_stream = LiveDataStream(symbol=us_symbol, update_interval=30)
         us_stream.add_signal_callback(signal_callback)
         us_stream.start_streaming()
-        streams[us_symbol] = us_stream
+        with streams_lock:
+            streams[us_symbol] = us_stream
         print(f"✅ Live stream initialized for {us_symbol}")
         # Sanity log to ensure data source path awareness
         try:
@@ -131,6 +179,48 @@ def init_live_stream():
     except Exception as e:
         print(f"⚠️ Could not start US30 stream: {e}")
     print("✅ Live streams initialized and started")
+    return streams
+
+
+def stop_live_streams(join_timeout: float = 10.0):
+    """Stop all stream workers and wait briefly for clean shutdown."""
+    with streams_lock:
+        active_streams = list(streams.values())
+        streams.clear()
+
+    for stream in active_streams:
+        try:
+            stream.stop_streaming()
+        except Exception as exc:
+            print(f"⚠️ Error stopping {getattr(stream, 'symbol', 'stream')}: {exc}")
+
+    for stream in active_streams:
+        worker = getattr(stream, 'stream_thread', None)
+        if worker and worker.is_alive():
+            worker.join(timeout=join_timeout)
+
+
+def start_background_monitors():
+    """Start process-level monitors exactly once."""
+    global auto_tp_thread
+    if auto_tp_thread and auto_tp_thread.is_alive():
+        return auto_tp_thread
+    auto_tp_stop.clear()
+    auto_tp_thread = threading.Thread(
+        target=monitor_auto_take_profit,
+        args=(auto_tp_stop,),
+        name='auto-take-profit-monitor',
+        daemon=True,
+    )
+    auto_tp_thread.start()
+    return auto_tp_thread
+
+
+def stop_background_monitors(join_timeout: float = 10.0):
+    """Ask process-level monitors to stop and wait for them."""
+    auto_tp_stop.set()
+    if auto_tp_thread and auto_tp_thread.is_alive():
+        auto_tp_thread.join(timeout=join_timeout)
 
 # Routes
 @app.route('/')
@@ -202,6 +292,50 @@ def get_status():
         return jsonify(st)
     return jsonify({'dashboard_status': 'initializing', 'real_data': 'loading', 'symbol': sym})
 
+
+@app.route('/api/health')
+def health_check():
+    """Small liveness/readiness endpoint for Windows services and Cloudflared."""
+    now = datetime.now()
+    with streams_lock:
+        current_streams = list(streams.values())
+
+    stream_health = {}
+    ready = bool(current_streams)
+    for stream in current_streams:
+        status = stream.get_status()
+        last_update = status.get('last_update')
+        age_seconds = None
+        if last_update:
+            try:
+                age_seconds = max(0.0, (now - datetime.fromisoformat(last_update)).total_seconds())
+            except ValueError:
+                age_seconds = None
+        # A stream is considered ready only after it has produced a recent
+        # update.  The generous threshold covers a temporary market/data pause.
+        stream_ready = (
+            bool(status.get('is_running'))
+            and bool(status.get('worker_alive'))
+            and (age_seconds is not None and age_seconds <= 180)
+        )
+        ready = ready and stream_ready
+        stream_health[stream.symbol] = {
+            'is_running': bool(status.get('is_running')),
+            'worker_alive': bool(status.get('worker_alive')),
+            'last_update': last_update,
+            'age_seconds': age_seconds,
+            'ready': stream_ready,
+        }
+
+    payload = {
+        'status': 'ready' if ready else 'starting',
+        'service': 'get-rich-fr-bot',
+        'checked_at': now.isoformat(),
+        'streams': stream_health,
+        'auto_take_profit_monitor': bool(auto_tp_thread and auto_tp_thread.is_alive()),
+    }
+    return jsonify(payload), (200 if ready else 503)
+
 @app.route('/api/trades')
 def get_trades():
     symbol = request.args.get('symbol')
@@ -228,7 +362,8 @@ def get_recent_trades():
 def pause_trading():
     global streams
     sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
-    s = streams.get(sym)
+    with streams_lock:
+        s = streams.get(sym)
     if s:
         s.is_running = False
         return jsonify({'status': 'paused', 'symbol': sym})
@@ -238,7 +373,8 @@ def pause_trading():
 def resume_trading():
     global streams
     sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
-    s = streams.get(sym)
+    with streams_lock:
+        s = streams.get(sym)
     if s and not s.is_running:
         s.start_streaming()
         return jsonify({'status': 'resumed', 'symbol': sym})
@@ -258,8 +394,9 @@ def session_toggle():
 @app.route('/api/farmer_toggle', methods=['POST'])
 def farmer_toggle():
     global streams
-    enabled = bool(request.json.get('enabled', False))
-    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    payload = request.get_json(silent=True) or {}
+    enabled = bool(payload.get('enabled', False))
+    sym = _requested_symbol(payload)
     s = streams.get(sym)
     if s:
         s.set_farmer_enabled(enabled)
@@ -269,12 +406,13 @@ def farmer_toggle():
 @app.route('/api/engine_toggle', methods=['POST'])
 def engine_toggle():
     global streams
-    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    payload = request.get_json(silent=True) or {}
+    sym = _requested_symbol(payload)
     s = streams.get(sym)
     if not s:
         return jsonify({'status': 'no_stream'})
-    level = request.json.get('level')
-    enabled = bool(request.json.get('enabled', True))
+    level = payload.get('level')
+    enabled = bool(payload.get('enabled', True))
     s.set_engine_enabled(level, enabled)
     return jsonify({'status': 'success','symbol': sym,'level': level,'engine_low_enabled': s.enable_low,'engine_medium_enabled': s.enable_medium,'engine_high_enabled': s.enable_high})
 
@@ -296,8 +434,9 @@ def engine_analytics():
 @app.route('/api/event_toggle', methods=['POST'])
 def event_toggle():
     global streams
-    enabled = bool(request.json.get('enabled', False))
-    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    payload = request.get_json(silent=True) or {}
+    enabled = bool(payload.get('enabled', False))
+    sym = _requested_symbol(payload)
     s = streams.get(sym)
     if s:
         s.set_event_mode(enabled)
@@ -309,7 +448,7 @@ def engine_mode():
     global streams
     payload = request.get_json(silent=True) or {}
     mode = payload.get('mode', 'ALL')
-    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    sym = _requested_symbol(payload)
     s = streams.get(sym)
     if s:
         try:
@@ -332,9 +471,7 @@ def engine_mode():
 def trading_toggle():
     global streams
     payload = request.get_json(silent=True) or {}
-    symbol = payload.get('symbol') or request.args.get('symbol')
-    if not symbol:
-        symbol = get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    symbol = _requested_symbol(payload)
     stream = streams.get(symbol)
     if not stream:
         return jsonify({'status': 'no_stream'}), 404
@@ -352,7 +489,7 @@ def nyupip_toggle():
     global streams
     payload = request.get_json(silent=True) or {}
     enabled = bool(payload.get('enabled', False))
-    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    sym = _requested_symbol(payload)
     s = streams.get(sym)
     if not s:
         return jsonify({'status': 'no_stream'}), 404
@@ -379,7 +516,7 @@ def ict_swing_toggle():
     global streams
     payload = request.get_json(silent=True) or {}
     enabled = bool(payload.get('enabled', False))
-    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    sym = _requested_symbol(payload)
     s = streams.get(sym)
     if not s:
         return jsonify({'status': 'no_stream'}), 404
@@ -407,7 +544,7 @@ def ict_atm_toggle():
     global streams
     payload = request.get_json(silent=True) or {}
     enabled = bool(payload.get('enabled', False))
-    sym = request.args.get('symbol') or get_config().get('broker', {}).get('symbol', 'XAUUSD')
+    sym = _requested_symbol(payload)
     s = streams.get(sym)
     if not s:
         return jsonify({'status': 'no_stream'}), 404
@@ -572,13 +709,8 @@ def get_total_profit():
                 'currency': 'USD'
             })
         
-        # Get account currency
-        try:
-            import MetaTrader5 as mt5
-            acc_info = mt5.account_info()
-            currency = getattr(acc_info, 'currency', 'USD') if acc_info else 'USD'
-        except Exception:
-            currency = 'USD'
+        acc_info = mt5_conn.get_account_info()
+        currency = getattr(acc_info, 'currency', 'USD') if acc_info else 'USD'
         
         # Sum all unrealized profits
         total_profit = sum(float(getattr(pos, 'profit', 0)) for pos in positions)
@@ -626,9 +758,10 @@ def set_auto_take_profit():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-def monitor_auto_take_profit():
+def monitor_auto_take_profit(stop_event=None):
     """Background thread that monitors total profit and closes all positions when threshold is reached"""
-    while True:
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
         try:
             with auto_tp_lock:
                 enabled = auto_take_profit['enabled']
@@ -643,12 +776,8 @@ def monitor_auto_take_profit():
                             total_profit = sum(float(getattr(pos, 'profit', 0)) for pos in positions)
                             
                             if total_profit >= threshold:
-                                try:
-                                    import MetaTrader5 as mt5
-                                    acc_info = mt5.account_info()
-                                    currency = getattr(acc_info, 'currency', '') if acc_info else ''
-                                except Exception:
-                                    currency = ''
+                                acc_info = mt5_conn.get_account_info()
+                                currency = getattr(acc_info, 'currency', '') if acc_info else ''
                                 
                                 print(f"🎯 Auto-take-profit triggered! Total profit: {total_profit:.2f}{currency} >= {threshold:.2f}{currency}")
                                 # Close all positions
@@ -674,10 +803,10 @@ def monitor_auto_take_profit():
                     print(f"⚠️ Error in auto-take-profit monitor: {e}")
             
             # Check every 5 seconds
-            time.sleep(5)
+            stop_event.wait(5)
         except Exception as e:
             print(f"⚠️ Error in auto-take-profit monitor thread: {e}")
-            time.sleep(5)
+            stop_event.wait(5)
 
 def ensure_professional_template():
     """Ensure the professional template is available"""
@@ -708,8 +837,7 @@ if __name__ == '__main__':
     
     # Start auto-take-profit monitoring thread
     print("💰 Starting auto-take-profit monitor...")
-    monitor_thread = threading.Thread(target=monitor_auto_take_profit, daemon=True)
-    monitor_thread.start()
+    start_background_monitors()
     print("✅ Auto-take-profit monitor started")
     
     # Start Flask app
@@ -717,10 +845,11 @@ if __name__ == '__main__':
     print("📱 Open http://localhost:5000 to see the new professional interface")
     print("🎯 Live signals with REAL market data will update every 30 seconds")
     print("Press Ctrl+C to stop")
+    configure_dashboard_logging()
     
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     except KeyboardInterrupt:
-        if live_stream:
-            live_stream.stop_streaming()
+        stop_background_monitors()
+        stop_live_streams()
         print("\n👋 Get Rich FR Bot dashboard stopped")

@@ -34,6 +34,16 @@ def _merge_env(cfg: Dict[str, Any]) -> Dict[str, Any]:
 	sessions = cfg.setdefault('sessions', {})
 	sessions['timezone'] = os.getenv('APP_TIMEZONE', sessions.get('timezone', 'Africa/Johannesburg'))
 
+	# Execution filters. These are explicitly exposed in .env so an operator can
+	# tune a broker's point-based spread without editing config.json.
+	filters = cfg.setdefault('filters', {})
+	max_spread_env = os.getenv('MAX_SPREAD_POINTS')
+	if max_spread_env:
+		try:
+			filters['max_spread_points'] = float(max_spread_env)
+		except ValueError:
+			pass
+
 	return cfg
 
 
