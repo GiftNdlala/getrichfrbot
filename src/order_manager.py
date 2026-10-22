@@ -2,6 +2,7 @@ from collections import deque, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
+import sys
 
 from .config import get_config
 from .persistence import PersistenceManager
@@ -114,6 +115,9 @@ class OrderManager:
 		])
 		self.consecutive_losses = 0
 		self.halt_new_orders = False
+
+	def _log_trade(self, message: str):
+		print(message, file=sys.__stdout__ or sys.stdout, flush=True)
 
 	def register_new_order(self, ticket: int, direction: int, entry: float, sl: float, tp: float, alert_level: str, tier: Optional[str] = None):
 		self.managed[ticket] = ManagedOrder(ticket=ticket, open_time=datetime.utcnow(), entry=entry, sl=sl, tp=tp, direction=direction, alert_level=alert_level, tier=tier)
@@ -238,7 +242,7 @@ class OrderManager:
 				direction = 'BUY' if state.direction == 1 else 'SELL'
 				close_text = f"{close_price:.2f}" if close_price is not None and close_price > 0 else "unknown"
 				pnl_text = f"{pnl:.2f}" if pnl is not None else "unknown"
-				print(f"ORDER CLOSED: ticket={ticket} direction={direction} close={close_text} pnl={pnl_text}", flush=True)
+				self._log_trade(f"ORDER CLOSED: ticket={ticket} direction={direction} close={close_text} pnl={pnl_text}")
 				try:
 					self.persistence.update_trade(ticket, payload)
 				except Exception as e:
@@ -283,7 +287,7 @@ class OrderManager:
 				if not self._try_loss_minimizer(pos, st):
 					print(f"ORDER CLOSING [TIME]: ticket={st.ticket} age_minutes={age.total_seconds() / 60:.1f}", flush=True)
 					closed = self.autotrader.close_position(st.ticket)
-					print(f"ORDER CLOSE REQUEST {'SENT' if closed else 'FAILED'} [TIME]: ticket={st.ticket}", flush=True)
+					self._log_trade(f"ORDER CLOSE REQUEST {'SENT' if closed else 'FAILED'} [TIME]: ticket={st.ticket}")
 					st.close_requested = bool(closed)
 					try:
 						fields = {'reason': 'TIME_CLOSE_REQUESTED' if closed else 'TIME_CLOSE_FAILED'}

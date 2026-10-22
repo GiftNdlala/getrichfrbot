@@ -10,6 +10,7 @@ import time
 import threading
 import contextlib
 import io
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable, List
 import json
@@ -327,7 +328,7 @@ class LiveDataStream:
             print(message, flush=True)
 
     def _log_trade(self, message: str):
-        print(message, flush=True)
+        print(message, file=sys.__stdout__ or sys.stdout, flush=True)
 
     def _quote_audit_fields(
         self,
