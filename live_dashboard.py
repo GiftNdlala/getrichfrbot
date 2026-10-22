@@ -7,6 +7,7 @@ Created by Gift Ndlala
 from flask import Flask, render_template, jsonify, request
 from dataclasses import asdict
 import logging
+import math
 import threading
 import time
 import json
@@ -39,6 +40,15 @@ auto_take_profit = {
 auto_tp_lock = threading.Lock()
 auto_tp_stop = threading.Event()
 auto_tp_thread = None
+
+
+def _account_currency():
+    try:
+        account = MT5Connector().get_account_info()
+        return getattr(account, 'currency', '') if account else ''
+    except Exception as exc:
+        app.logger.warning("Could not read account currency for auto TP: %s", exc)
+        return ''
 
 
 def _requested_symbol(payload=None):
@@ -295,7 +305,7 @@ def get_status():
 
 @app.route('/api/health')
 def health_check():
-    """Small liveness/readiness endpoint for Windows services and Cloudflared."""
+    """Small liveness/readiness endpoint for the runtime and health checks."""
     now = datetime.now()
     with streams_lock:
         current_streams = list(streams.values())
@@ -357,6 +367,15 @@ def get_recent_trades():
     except Exception:
         rows = []
     return jsonify({'status': 'success', 'trades': rows, 'hours': hours, 'count': len(rows)})
+
+@app.route('/api/trades/<int:ticket>/events')
+def get_trade_events(ticket):
+    try:
+        events = persistence.get_trade_events(ticket)
+        return jsonify({'status': 'success', 'ticket': ticket, 'events': events, 'count': len(events)})
+    except Exception:
+        app.logger.exception("Failed to read trade events for ticket %s", ticket)
+        return jsonify({'status': 'error', 'message': 'Could not read trade event history'}), 500
 
 @app.route('/api/pause', methods=['POST'])
 def pause_trading():
@@ -728,11 +747,13 @@ def get_total_profit():
 def get_auto_take_profit():
     """Get auto-take-profit settings"""
     with auto_tp_lock:
-        return jsonify({
+        settings = {
             'status': 'success',
             'enabled': auto_take_profit['enabled'],
-            'threshold': auto_take_profit['threshold']
-        })
+            'threshold': auto_take_profit['threshold'],
+        }
+    settings['currency'] = _account_currency()
+    return jsonify(settings)
 
 @app.route('/api/auto_take_profit', methods=['POST'])
 def set_auto_take_profit():
@@ -740,23 +761,32 @@ def set_auto_take_profit():
     try:
         payload = request.get_json(silent=True) or {}
         enabled = bool(payload.get('enabled', False))
-        threshold = float(payload.get('threshold', 30.0))
-        
-        if threshold < 0:
-            return jsonify({'status': 'error', 'message': 'Threshold must be positive'}), 400
+        try:
+            threshold = float(payload.get('threshold'))
+        except (TypeError, ValueError):
+            threshold = None
+        if threshold is not None and (not math.isfinite(threshold) or threshold <= 0):
+            threshold = None
+        if enabled and threshold is None:
+            return jsonify({'status': 'error', 'message': 'Enter a valid profit target greater than zero'}), 400
         
         with auto_tp_lock:
             auto_take_profit['enabled'] = enabled
-            auto_take_profit['threshold'] = threshold
+            if threshold is not None:
+                auto_take_profit['threshold'] = threshold
+            threshold = auto_take_profit['threshold']
         
+        currency = _account_currency()
         return jsonify({
             'status': 'success',
             'enabled': enabled,
             'threshold': threshold,
+            'currency': currency,
             'message': f'Auto-take-profit {"enabled" if enabled else "disabled"} at {threshold} threshold'
         })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    except Exception:
+        app.logger.exception("Failed to update auto-take-profit settings")
+        return jsonify({'status': 'error', 'message': 'Could not update auto-take-profit settings'}), 500
 
 def monitor_auto_take_profit(stop_event=None):
     """Background thread that monitors total profit and closes all positions when threshold is reached"""
@@ -848,7 +878,12 @@ if __name__ == '__main__':
     configure_dashboard_logging()
     
     try:
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+        app.run(
+            host=os.getenv("BOT_HOST", "127.0.0.1"),
+            port=int(os.getenv("BOT_PORT", "5000")),
+            debug=False,
+            threaded=True,
+        )
     except KeyboardInterrupt:
         stop_background_monitors()
         stop_live_streams()

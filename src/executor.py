@@ -247,8 +247,11 @@ class AutoTrader:
 			)
 			return {
 				"ticket": result.order,
+				"open_deal_id": getattr(result, "deal", None),
 				"volume": lots,
 				"price": result.price,
+				"magic": request["magic"],
+				"order_comment": comment,
 			}
 		# Failed open attempt
 		try:

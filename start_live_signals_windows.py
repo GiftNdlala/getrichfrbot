@@ -93,7 +93,12 @@ def start_live_dashboard():
         print()
         
         # Start Flask app
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+        app.run(
+            host=os.getenv("BOT_HOST", "127.0.0.1"),
+            port=int(os.getenv("BOT_PORT", "5000")),
+            debug=False,
+            threaded=True,
+        )
         
     except KeyboardInterrupt:
         print()

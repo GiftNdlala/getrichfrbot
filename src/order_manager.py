@@ -25,6 +25,7 @@ class ManagedOrder:
 	direction: int
 	alert_level: str
 	tier: Optional[str] = None
+	close_requested: bool = False
 
 
 class CampaignManager:
@@ -151,6 +152,12 @@ class OrderManager:
 				close_price = None
 				close_time_iso = None
 				pnl = None
+				close_deal_id = None
+				commission = None
+				swap = None
+				close_reason = None
+				closing_deals = []
+				position_deals = []
 				try:
 					deals = []
 					if hasattr(self.mt5, 'get_deals_for_position'):
@@ -167,25 +174,35 @@ class OrderManager:
 
 					# Find the most recent exit deal for this position.
 					# MT5 uses `entry` (IN/OUT) to classify close legs.
-					closing_deal = None
 					for d in deals or []:
 						pos = getattr(d, 'position', None)
 						if pos is None:
 							pos = getattr(d, 'position_id', None)
-						if pos is not None and int(pos) != int(ticket):
+						if pos is None or int(pos) != int(ticket):
 							continue
+						position_deals.append(d)
 
 						deal_entry = getattr(d, 'entry', None)
-						is_exit = deal_entry in (1, 3)  # DEAL_ENTRY_OUT / DEAL_ENTRY_OUT_BY
-						if is_exit:
-							if not closing_deal or _deal_ts(d) >= _deal_ts(closing_deal):
-								closing_deal = d
-						elif not closing_deal:
-							closing_deal = d
+						if deal_entry in (1, 3):  # DEAL_ENTRY_OUT / DEAL_ENTRY_OUT_BY
+							closing_deals.append(d)
 					
-					if closing_deal:
-						close_price = float(getattr(closing_deal, 'price', 0.0))
-						pnl = float(getattr(closing_deal, 'profit', 0.0))
+					if closing_deals:
+						closing_deal = max(closing_deals, key=_deal_ts)
+						exit_volume = sum(float(getattr(d, 'volume', 0.0) or 0.0) for d in closing_deals)
+						if exit_volume > 0:
+							close_price = sum(
+								float(getattr(d, 'price', 0.0) or 0.0)
+								* float(getattr(d, 'volume', 0.0) or 0.0)
+								for d in closing_deals
+							) / exit_volume
+						else:
+							close_price = float(getattr(closing_deal, 'price', 0.0))
+						pnl = sum(float(getattr(d, 'profit', 0.0) or 0.0) for d in closing_deals)
+						close_deal_id = getattr(closing_deal, 'ticket', None)
+						commission = sum(float(getattr(d, 'commission', 0.0) or 0.0) for d in position_deals)
+						swap = sum(float(getattr(d, 'swap', 0.0) or 0.0) for d in position_deals)
+						pnl += commission + swap
+						close_reason = str(getattr(closing_deal, 'reason', '') or '')
 						try:
 							import datetime as _dt
 							ts = getattr(closing_deal, 'time', None)
@@ -197,6 +214,10 @@ class OrderManager:
 						print(f"⚠️ No closing deal found for ticket {ticket} in {len(deals or [])} deals")
 				except Exception as e:
 					print(f"❌ Error fetching close data for ticket {ticket}: {e}")
+
+				if not closing_deals:
+					print(f"ORDER CLOSE UNCONFIRMED: ticket={ticket}; retaining tracking until broker close deal is available", flush=True)
+					continue
 				
 				payload = {'status': 'CLOSED'}
 				if close_price is not None and close_price > 0:
@@ -206,6 +227,14 @@ class OrderManager:
 					payload['close_time'] = close_time_iso
 				if pnl is not None:
 					payload['pnl'] = pnl
+				if close_deal_id is not None:
+					payload['close_deal_id'] = close_deal_id
+				if commission is not None:
+					payload['commission'] = commission
+				if swap is not None:
+					payload['swap'] = swap
+				if close_reason:
+					payload['reason'] = close_reason
 				direction = 'BUY' if state.direction == 1 else 'SELL'
 				close_text = f"{close_price:.2f}" if close_price is not None and close_price > 0 else "unknown"
 				pnl_text = f"{pnl:.2f}" if pnl is not None else "unknown"
@@ -249,20 +278,20 @@ class OrderManager:
 				pass
 			# Time-based exit with loss minimizer
 			if age >= max_age:
+				if st.close_requested:
+					return
 				if not self._try_loss_minimizer(pos, st):
 					print(f"ORDER CLOSING [TIME]: ticket={st.ticket} age_minutes={age.total_seconds() / 60:.1f}", flush=True)
 					closed = self.autotrader.close_position(st.ticket)
 					print(f"ORDER CLOSE REQUEST {'SENT' if closed else 'FAILED'} [TIME]: ticket={st.ticket}", flush=True)
+					st.close_requested = bool(closed)
 					try:
-						self.persistence.update_trade(st.ticket, {
-							'status': 'CLOSED',
-							'reason': 'TIME'
-						})
+						fields = {'reason': 'TIME_CLOSE_REQUESTED' if closed else 'TIME_CLOSE_FAILED'}
+						self.persistence.update_trade(st.ticket, fields)
 					except Exception as e:
 						print(f"ORDER CLOSE PERSIST WARNING: ticket={st.ticket} error={e}", flush=True)
-					self.managed.pop(st.ticket, None)
-		except Exception:
-			return
+		except Exception as exc:
+			print(f"ORDER EXIT MANAGEMENT ERROR: ticket={st.ticket} error={exc}", flush=True)
 
 	def _approx_unrealized_dollars(self, pos, current_price: float) -> float:
 		try:

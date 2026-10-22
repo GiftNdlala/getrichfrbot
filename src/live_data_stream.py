@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable, List
 import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+from uuid import uuid4
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(__file__))
 
@@ -119,6 +120,12 @@ class LiveSignal:
     signal_pos_votes: int = 0
     signal_neg_votes: int = 0
     signal_total_votes: int = 0
+    signal_id: str = field(default_factory=lambda: str(uuid4()))
+    data_source: Optional[str] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    point: Optional[float] = None
+    spread_points: Optional[float] = None
 
 class LiveDataStream:
     """
@@ -197,6 +204,7 @@ class LiveDataStream:
         self._stream_generation = 0
         self._stop_event = threading.Event()
         self.persistence = PersistenceManager() if PersistenceManager else None
+        self._last_quote: Dict = {}
         self.autotrader = AutoTrader(symbol=self.symbol) if AutoTrader else None
         # Managers
         exec_cfg = self.config.get('execution', {})
@@ -320,6 +328,30 @@ class LiveDataStream:
 
     def _log_trade(self, message: str):
         print(message, flush=True)
+
+    def _quote_audit_fields(
+        self,
+        signal_id: str,
+        signal_price: float,
+        setup_id: Optional[str] = None,
+        quote: Optional[Dict] = None,
+        trade: Optional[Dict] = None,
+    ) -> Dict:
+        quote = quote or self._last_quote or {}
+        trade = trade or {}
+        return {
+            'signal_id': signal_id,
+            'signal_price': signal_price,
+            'data_source': quote.get('source'),
+            'bid': quote.get('bid'),
+            'ask': quote.get('ask'),
+            'point': quote.get('point'),
+            'spread_points': quote.get('spread_points'),
+            'setup_id': setup_id,
+            'magic': trade.get('magic'),
+            'order_comment': trade.get('order_comment'),
+            'open_deal_id': trade.get('open_deal_id'),
+        }
 
     def _quiet_status_stdout(self):
         if self._terminal_trades_only():
@@ -697,7 +729,8 @@ class LiveDataStream:
                             'price': current_data['price'],
                             'prev_close': current_data.get('prev_close', current_data['price']),
                             'timestamp': current_data['timestamp'],
-                            'volume': current_data.get('volume', 50000)
+                            'volume': current_data.get('volume', 50000),
+                            'source': f"REAL-{getattr(self.data_source, 'data_source', 'robust')}",
                         }
                 except Exception as e:
                     self._log_status(f"⚠️ Robust data source error: {e}")
@@ -1135,6 +1168,11 @@ class LiveDataStream:
             signal_pos_votes=pos_votes,
             signal_neg_votes=neg_votes,
             signal_total_votes=total_votes,
+            data_source=current_quote.get('source'),
+            bid=current_quote.get('bid'),
+            ask=current_quote.get('ask'),
+            point=current_quote.get('point'),
+            spread_points=current_quote.get('spread_points'),
         )
     
     def _calculate_confidence(self, latest_data: pd.Series, signal: int) -> float:
@@ -1220,6 +1258,8 @@ class LiveDataStream:
                 try:
                     # Fetch current quote
                     current_quote = self._fetch_current_quote()
+                    if current_quote:
+                        self._last_quote = dict(current_quote)
                     
                     if current_quote:
                         # Pre-trade guard: spread and ATR floors
@@ -1311,17 +1351,13 @@ class LiveDataStream:
                                     )
                                     if trade:
                                         self._log_trade(f"ORDER SENT [EVENT]: ticket={trade.get('ticket')} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={tp:.2f}")
-                                        if self.order_manager:
-                                            try:
-                                                self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp, 'EVENT', tier='EVENT')
-                                            except Exception as e:
-                                                self._log_status(f"Order manager EVENT error: {e}")
                                     if trade and self.persistence:
                                         self.persistence.save_trade({
                                             'timestamp': live_signal.timestamp,
                                             'symbol': live_signal.symbol,
                                             'direction': side,
                                             'entry': trade.get('price', entry),
+                                            'fill_price': trade.get('price', entry),
                                             'sl': sl,
                                             'tp': tp,
                                             'lots': trade.get('volume', 0.0),
@@ -1329,8 +1365,28 @@ class LiveDataStream:
                                             'status': 'SENT',
                                             'alert_level': 'EVENT',
                                             'tier': 'EVENT',
-                                            'engine': 'EVENT'
+                                            'engine': 'EVENT',
+                                            **self._quote_audit_fields(
+                                                live_signal.signal_id,
+                                                entry,
+                                                setup_id='EVENT',
+                                                quote=current_quote,
+                                                trade=trade,
+                                            ),
                                         })
+                                    if trade and self.order_manager:
+                                        try:
+                                            self.order_manager.register_new_order(
+                                                trade.get('ticket'),
+                                                side,
+                                                trade.get('price', entry),
+                                                sl,
+                                                tp,
+                                                'EVENT',
+                                                tier='EVENT',
+                                            )
+                                        except Exception as e:
+                                            self._log_status(f"Order manager EVENT error: {e}")
                             except Exception as e:
                                 self._log_status(f"⚠️ Event engine error: {e}")
 
@@ -1482,6 +1538,7 @@ class LiveDataStream:
                                                         'symbol': live_signal.symbol,
                                                         'direction': side,
                                                         'entry': trade.get('price', entry),
+                                                        'fill_price': trade.get('price', entry),
                                                         'sl': sl,
                                                         'tp': local_tp,
                                                         'lots': trade.get('volume', 0.0),
@@ -1489,13 +1546,20 @@ class LiveDataStream:
                                                         'status': 'SENT',
                                                         'alert_level': level,
                                                         'tier': tier_name or '',
-                                                        'engine': engine
+                                                        'engine': engine,
+                                                        **self._quote_audit_fields(
+                                                            live_signal.signal_id,
+                                                            entry,
+                                                            setup_id=f"{engine}:{level}:{tier_name or 'BASE'}",
+                                                            quote=current_quote,
+                                                            trade=trade,
+                                                        ),
                                                     })
                                                 except Exception as e:
                                                     self._log_status(f"⚠️ Trade persist error: {e}")
                                             if trade and self.order_manager:
                                                 try:
-                                                    self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, local_tp, level, tier=tier_name)
+                                                    self.order_manager.register_new_order(trade.get('ticket'), side, trade.get('price', entry), sl, local_tp, level, tier=tier_name)
                                                 except Exception as e:
                                                     self._log_status(f"Order manager {engine} error: {e}")
                                             if trade and self.campaign:
@@ -1568,6 +1632,7 @@ class LiveDataStream:
                                                         'symbol': live_signal.symbol,
                                                         'direction': side,
                                                         'entry': trade.get('price', entry),
+                                                        'fill_price': trade.get('price', entry),
                                                         'sl': sl,
                                                         'tp': tp_small,
                                                         'lots': trade.get('volume', 0.0),
@@ -1575,13 +1640,20 @@ class LiveDataStream:
                                                         'status': 'SENT',
                                                         'alert_level': 'HIGH',
                                                         'tier': 'FARMER',
-                                                        'engine': 'FARMER'
+                                                        'engine': 'FARMER',
+                                                        **self._quote_audit_fields(
+                                                            live_signal.signal_id,
+                                                            entry,
+                                                            setup_id='FARMER',
+                                                            quote=current_quote,
+                                                            trade=trade,
+                                                        ),
                                                     })
                                                 except Exception as e:
                                                     self._log_status(f"⚠️ Farmer persist error: {e}")
                                             if trade and self.order_manager:
                                                 try:
-                                                    self.order_manager.register_new_order(trade.get('ticket'), side, entry, sl, tp_small, 'HIGH', tier='FARMER')
+                                                    self.order_manager.register_new_order(trade.get('ticket'), side, trade.get('price', entry), sl, tp_small, 'HIGH', tier='FARMER')
                                                 except Exception as e:
                                                     self._log_status(f"Order manager FARMER error: {e}")
                                             if trade and self.campaign:
@@ -1939,6 +2011,8 @@ class LiveDataStream:
         current_quote: Optional[Dict[str, float]] = None,
     ):
         payload = signal.to_payload()
+        signal_id = str(uuid4())
+        quote = current_quote or self._last_quote
         self.nyupip_state['last_signal'] = payload
         self.nyupip_state['last_diagnostics'] = self.nyupip_strategy.get_last_diagnostics()
 
@@ -1956,8 +2030,23 @@ class LiveDataStream:
                     'strategy': 'NYUPIP',
                     'timestamp': signal.timestamp.isoformat(),
                     'direction': signal.direction,
+                    'current_price': quote.get('price', signal.entry_price),
+                    'signal': signal.direction,
+                    'signal_type': 'BUY' if signal.direction == 1 else 'SELL',
+                    'alert_level': signal.module,
+                    'entry_price': signal.entry_price,
+                    'stop_loss': signal.stop_loss,
+                    'take_profit_1': signal.take_profit_primary,
+                    'take_profit_2': signal.take_profit_secondary,
+                    'take_profit_3': signal.take_profit_tertiary,
+                    **self._quote_audit_fields(
+                        signal_id,
+                        signal.entry_price,
+                        setup_id=f"NYUPIP:{signal.module}",
+                        quote=quote,
+                    ),
                 })
-                self.persistence.save_signal(record)
+                signal_id = self.persistence.save_signal(record)
             except Exception as exc:
                 self._log_status(f"⚠️ NYUPIP persist error: {exc}")
 
@@ -2059,6 +2148,7 @@ class LiveDataStream:
                     'symbol': self.symbol,
                     'direction': signal.direction,
                     'entry': trade.get('price', signal.entry_price),
+                    'fill_price': trade.get('price', signal.entry_price),
                     'sl': signal.stop_loss,
                     'tp': signal.take_profit_primary,
                     'lots': trade.get('volume', 0.0),
@@ -2066,7 +2156,14 @@ class LiveDataStream:
                     'status': 'SENT',
                     'alert_level': signal.module,
                     'tier': 'NYUPIP',
-                    'engine': f'NYUPIP_{signal.module}'
+                    'engine': f'NYUPIP_{signal.module}',
+                    **self._quote_audit_fields(
+                        signal_id,
+                        signal.entry_price,
+                        setup_id=f"NYUPIP:{signal.module}",
+                        quote=quote,
+                        trade=trade,
+                    ),
                 })
             except Exception as exc:
                 self._log_status(f"⚠️ NYUPIP trade persist error: {exc}")
@@ -2076,7 +2173,7 @@ class LiveDataStream:
                 self.order_manager.register_new_order(
                     ticket,
                     signal.direction,
-                    signal.entry_price,
+                    trade.get('price', signal.entry_price),
                     signal.stop_loss,
                     signal.take_profit_primary,
                     signal.module,
@@ -2087,6 +2184,7 @@ class LiveDataStream:
 
     def _process_ict_swing_signal(self, signal: ICTSwingSignal, spread_block: bool, atr_block: bool):
         payload = signal.to_payload()
+        signal_id = str(uuid4())
         self.ict_swing_state['last_signal'] = payload
         if self.ict_swing_strategy:
             self.ict_swing_state['last_diagnostics'] = self.ict_swing_strategy.get_last_diagnostics()
@@ -2130,6 +2228,11 @@ class LiveDataStream:
                     'potential_profit_tp1': None,
                     'potential_profit_tp2': None,
                     'potential_profit_tp3': None,
+                    **self._quote_audit_fields(
+                        signal_id,
+                        signal.entry_price,
+                        setup_id=f"ICT_SWING:{signal.session}:{signal.scenario}",
+                    ),
                 })
             except Exception as exc:
                 self._log_status(f"⚠️ ICT Swing persist error: {exc}")
@@ -2214,6 +2317,7 @@ class LiveDataStream:
                     'symbol': self.symbol,
                     'direction': signal.direction,
                     'entry': trade.get('price', signal.entry_price),
+                    'fill_price': trade.get('price', signal.entry_price),
                     'sl': signal.stop_loss,
                     'tp': signal.take_profit_primary,
                     'lots': trade.get('volume', 0.0),
@@ -2221,7 +2325,13 @@ class LiveDataStream:
                     'status': 'SENT',
                     'alert_level': signal.session,
                     'tier': signal.scenario,
-                    'engine': 'ICT_SWING'
+                    'engine': 'ICT_SWING',
+                    **self._quote_audit_fields(
+                        signal_id,
+                        signal.entry_price,
+                        setup_id=f"ICT_SWING:{signal.session}:{signal.scenario}",
+                        trade=trade,
+                    ),
                 })
             except Exception as exc:
                 self._log_status(f"⚠️ ICT Swing trade persist error: {exc}")
@@ -2231,7 +2341,7 @@ class LiveDataStream:
                 self.order_manager.register_new_order(
                     ticket,
                     signal.direction,
-                    signal.entry_price,
+                    trade.get('price', signal.entry_price),
                     signal.stop_loss,
                     signal.take_profit_primary,
                     f"ICT_SWING_{signal.session}",
@@ -2244,6 +2354,7 @@ class LiveDataStream:
 
     def _process_ict_atm_signal(self, signal: ICTATMSignal, spread_block: bool, atr_block: bool):
         payload = signal.to_payload()
+        signal_id = str(uuid4())
         self.ict_atm_state['last_signal'] = payload
         if self.ict_atm_strategy:
             self.ict_atm_state['last_diagnostics'] = self.ict_atm_strategy.get_last_diagnostics()
@@ -2287,6 +2398,11 @@ class LiveDataStream:
                     'potential_profit_tp1': None,
                     'potential_profit_tp2': None,
                     'potential_profit_tp3': None,
+                    **self._quote_audit_fields(
+                        signal_id,
+                        signal.entry_price,
+                        setup_id='ICT_ATM',
+                    ),
                 })
             except Exception as exc:
                 self._log_status(f"⚠️ ICT ATM persist error: {exc}")
@@ -2371,6 +2487,7 @@ class LiveDataStream:
                     'symbol': self.symbol,
                     'direction': signal.direction,
                     'entry': trade.get('price', signal.entry_price),
+                    'fill_price': trade.get('price', signal.entry_price),
                     'sl': signal.stop_loss,
                     'tp': signal.take_profit_primary,
                     'lots': trade.get('volume', 0.0),
@@ -2378,7 +2495,13 @@ class LiveDataStream:
                     'status': 'SENT',
                     'alert_level': 'ICT_ATM',
                     'tier': 'ICT_ATM',
-                    'engine': 'ICT_ATM'
+                    'engine': 'ICT_ATM',
+                    **self._quote_audit_fields(
+                        signal_id,
+                        signal.entry_price,
+                        setup_id='ICT_ATM',
+                        trade=trade,
+                    ),
                 })
             except Exception as exc:
                 self._log_status(f"⚠️ ICT ATM trade persist error: {exc}")
@@ -2388,7 +2511,7 @@ class LiveDataStream:
                 self.order_manager.register_new_order(
                     ticket,
                     signal.direction,
-                    signal.entry_price,
+                    trade.get('price', signal.entry_price),
                     signal.stop_loss,
                     signal.take_profit_primary,
                     'ICT_ATM',

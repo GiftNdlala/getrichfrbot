@@ -26,8 +26,74 @@ Invoke-WebRequest http://127.0.0.1:5000/api/health
 
 The health endpoint returns HTTP 200 only after the streams are running and
 have produced a recent market update. It returns HTTP 503 while starting or
-when the stream is stale, which is useful for Cloudflared or external
-monitoring.
+when the stream is stale.
 
-Do not expose port 5000 directly to the public internet. Restrict the EC2
-security group and use Cloudflared for mobile access.
+## SQLite trade history
+
+The bot uses Python's built-in SQLite support; no separate database server or
+SQLite installation is needed. Starting the bot creates
+`data\trades.sqlite`. Signals, trade details, quote context, and a per-order
+event history are stored there. Keep the database on the VM's local disk, not
+a network share. Stop the scheduled task before copying the database for a
+backup.
+
+Check that the file exists:
+
+```powershell
+Test-Path .\data\trades.sqlite
+```
+
+## Private dashboard access with Tailscale
+
+The dashboard includes endpoints that can change trading state and close
+positions. Do not expose port 5000 directly to the internet or forward it from
+the router/EC2 security group. Tailscale provides private access from your
+devices without a public dashboard URL.
+
+1. Install Tailscale on the Windows bot VM and sign it into your private
+   tailnet (use the official Windows installer). Install/sign in on each
+   phone or computer that needs access.
+2. On the VM, open PowerShell and run:
+
+   ```powershell
+   tailscale ip -4
+   ```
+
+3. Copy the returned `100.x.x.x` address into the VM's ignored `.env` file:
+
+   ```dotenv
+   BOT_HOST=100.x.x.x
+   BOT_PORT=5000
+   ```
+
+   Replace `100.x.x.x` with the VM's actual Tailscale IPv4 address. The
+   launcher loads `.env` before starting the web server and binds only to that
+   address.
+   If Windows Firewall blocks access, add a narrow inbound rule from
+   Tailscale addresses only, from an elevated PowerShell:
+
+   ```powershell
+   New-NetFirewallRule `
+     -DisplayName "GetRichFRBot Tailscale dashboard" `
+     -Direction Inbound -Protocol TCP -LocalPort 5000 `
+     -RemoteAddress 100.64.0.0/10 -Action Allow
+   ```
+
+4. Restart the bot task:
+
+   ```powershell
+   Stop-ScheduledTask -TaskName GetRichFRBot
+   Start-ScheduledTask -TaskName GetRichFRBot
+   ```
+
+5. From an authenticated device on your tailnet, open
+   `http://100.x.x.x:5000` using the same Tailscale address.
+
+Keep tailnet membership limited to trusted devices/users. Do not enable
+Tailscale Funnel, add a public port-forward, or change `BOT_HOST` to
+`0.0.0.0`. If your VM's Tailscale address changes, update `.env` and restart
+the task. The SQLite file remains on the VM and is not exposed to dashboard
+clients. The devices accessing the dashboard must have Tailscale installed
+and be signed into your tailnet. `/api/recent_trades` returns the detailed
+trade rows, and `/api/trades/<ticket>/events` returns that order's lifecycle
+audit events.

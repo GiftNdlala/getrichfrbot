@@ -116,17 +116,22 @@ class MT5Connector:
 			if rates is not None and len(rates) >= 2:
 				prev_close = float(rates[-2]['close'])
 			spread = 0.0
-			if tick.bid and tick.ask:
+			info = mt5.symbol_info(self.symbol)
+			point = float(info.point) if info and info.point else None
+			bid = float(tick.bid) if tick.bid else None
+			ask = float(tick.ask) if tick.ask else None
+			if bid is not None and ask is not None and point:
 				# Points, not pips
-				info = mt5.symbol_info(self.symbol)
-				point = info.point if info else 0.01
-				spread = float((tick.ask - tick.bid) / (point or 0.01))
+				spread = float((ask - bid) / point)
 			return {
 				'price': price,
 				'prev_close': prev_close,
 				'timestamp': dt.datetime.fromtimestamp(tick.time or dt.datetime.now().timestamp()),
 				'volume': float(tick.volume) if hasattr(tick, 'volume') and tick.volume else 0.0,
 				'spread_points': spread,
+				'bid': bid,
+				'ask': ask,
+				'point': point,
 				'source': 'MT5'
 			}
 		return None
