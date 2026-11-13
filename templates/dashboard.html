@@ -616,15 +616,17 @@
                 <button id="btn-ict-atm-toggle" data-enabled="false" style="padding:10px 16px; border-radius:8px; border:none; background:#9E9E9E; color:#fff; font-weight:600; cursor:pointer;">ICT ATM: Off</button>
                 <select id="engine-mode" style="padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); color:white;">
                     <option value="NONE">Mode: NONE</option>
-                    <option value="ALL" selected>Mode: ALL</option>
+                    <option value="ALL" selected>All strategies (Event separate)</option>
                     <option value="FARMER_ONLY">Farmer Only</option>
                     <option value="LOW_ONLY">LOW Only</option>
                     <option value="MEDIUM_ONLY">MEDIUM Only</option>
                     <option value="HIGH_ONLY">HIGH Only</option>
                     <option value="EVENT_ONLY">EVENT Only</option>
                 </select>
+                <button id="enable-all-strategies" type="button">Enable all strategies</button>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
+                <div id="strategy-decisions" role="status" aria-live="polite" style="white-space:pre-line; font-size:13px; margin:8px 0; color:#cbd5e1;"></div>
                 <div id="farmer-badge" class="status-indicator status-active">🌾 Farmer in: --s</div>
                 <div id="throttle-status" class="status-indicator status-hold">Campaign: --</div>
                 <div id="nyupip-status" class="status-indicator status-hold">NYUPIP: Off</div>
@@ -666,7 +668,7 @@
                         </div>
                     </div>
                     <div class="confidence">
-                        Confidence: <span id="confidence-text">0%</span>
+                        Alignment score: <span id="confidence-text">0%</span>
                         <div class="confidence-bar">
                             <div class="confidence-fill" id="confidence-fill"></div>
                         </div>
@@ -689,17 +691,17 @@
                         <div class="trade-card take-profit">
                             <div class="trade-label" id="tp1-label">🎯 Take Profit 1</div>
                             <div class="trade-value" id="take-profit-1">--</div>
-                            <div class="trade-sub">Profit: <span id="profit-tp1">$--</span></div>
+                            <div class="trade-sub">Budget scenario: <span id="profit-tp1">$--</span></div>
                         </div>
                         <div class="trade-card take-profit">
                             <div class="trade-label" id="tp2-label">🎯 Take Profit 2</div>
                             <div class="trade-value" id="take-profit-2">--</div>
-                            <div class="trade-sub">Profit: <span id="profit-tp2">$--</span></div>
+                            <div class="trade-sub">Budget scenario: <span id="profit-tp2">$--</span></div>
                         </div>
                         <div class="trade-card take-profit">
                             <div class="trade-label" id="tp3-label">🎯 Take Profit 3</div>
                             <div class="trade-value" id="take-profit-3">--</div>
-                            <div class="trade-sub">Profit: <span id="profit-tp3">$--</span></div>
+                            <div class="trade-sub">Budget scenario: <span id="profit-tp3">$--</span></div>
                         </div>
                         <div class="trade-card risk-reward">
                             <div class="trade-label">📊 Risk/Reward</div>
@@ -715,7 +717,7 @@
                                 <div class="position-value" id="position-size">--%</div>
                             </div>
                             <div class="position-card">
-                                <div class="position-label">Risk Amount</div>
+                                <div class="position-label">Risk budget</div>
                                 <div class="position-value" id="risk-amount">$--</div>
                             </div>
                             <div class="position-card">
@@ -986,7 +988,7 @@
                 alertBadge.className = `alert-badge ${data.alert_level}`;
                 
                 document.getElementById('target-pips-text').textContent = `${data.target_pips} pips target`;
-                document.getElementById('success-rate-text').textContent = `${data.success_rate.toFixed(1)}% success rate`;
+                document.getElementById('success-rate-text').textContent = 'Win rate: not yet measured';
             } else {
                 alertSection.style.display = 'none';
             }
@@ -1130,7 +1132,7 @@
                             <div class="history-time">${time}</div>
                             <div class="history-signal">${signal.signal_type}</div>
                             <div class="history-price">$${signal.current_price.toFixed(2)}</div>
-                            <div class="history-confidence">Confidence: ${signal.confidence.toFixed(1)}%</div>
+                            <div class="history-confidence">Alignment score: ${signal.confidence.toFixed(1)}%</div>
                         </div>
                     `;
                 });
@@ -1144,7 +1146,7 @@
                         <div class="history-time">${time}</div>
                         <div class="history-signal">${data.signal_type}</div>
                         <div class="history-price">$${data.current_price.toFixed(2)}</div>
-                        <div class="history-confidence">Confidence: ${data.confidence.toFixed(1)}%</div>
+                        <div class="history-confidence">Alignment score: ${data.confidence.toFixed(1)}%</div>
                     </div>
                 `;
             }
@@ -1192,7 +1194,16 @@
                 if (!status || typeof status.farmer_next_in_seconds === 'undefined') return;
                 const enabled = !!status.farmer_enabled;
                 badge.className = `status-indicator ${enabled ? 'status-active' : 'status-hold'}`;
-                badge.textContent = `🌾 Farmer ${enabled ? 'in' : 'disabled'}: ${enabled ? (status.farmer_next_in_seconds ?? '--') + 's' : ''}`;
+                const decisionBox = document.getElementById('strategy-decisions');
+                if (decisionBox) {
+                    const decisions = Object.entries(status.strategy_decisions || {});
+                    const lines = decisions.map(([name, value]) => `${name.replaceAll('_', ' ')}: ${String(value.status || 'waiting')} — ${String(value.reason || 'waiting for setup').replaceAll('_', ' ').toLowerCase()}`);
+                    if (status.news_calendar_blocker) lines.unshift(`Entries paused: ${String(status.news_calendar_blocker).replaceAll('_', ' ').toLowerCase()}`);
+                    decisionBox.textContent = lines.join('\n');
+                }
+                const detail = status.farmer_diagnostics || {};
+                const reason = String(detail.order_blocker || status.last_execution_blocker || detail.reason || 'monitoring').replaceAll('_', ' ').toLowerCase();
+                badge.textContent = enabled ? `🌾 Farmer: ${reason}` : '🌾 Farmer: off';
                 const btn = document.getElementById('btn-farmer-toggle');
                 if (btn) btn.textContent = `Farmer: ${enabled ? 'On' : 'Off'}`;
                 const evBtn = document.getElementById('btn-event-toggle');
@@ -1508,6 +1519,13 @@
             }
         });
 
+        document.getElementById('enable-all-strategies').addEventListener('click', async () => {
+            try {
+                const response = await fetch('/api/engine_mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode:'ALL' }) });
+                if (!response.ok) throw new Error('Unable to enable strategies');
+                await fetchStatusOnly();
+            } catch (error) { alert(error.message); }
+        });
         document.addEventListener('change', async (e) => {
             if (e.target && e.target.id === 'engine-mode') {
                 const mode = e.target.value;

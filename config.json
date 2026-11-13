@@ -3,12 +3,13 @@
     "name": "Exness",
     "platform": "MT5",
     "server": "Exness-MT5Trial10",
-    "login": 81783984,
+    "login": 81988812,
     "symbol": "XAUUSDm"
   },
   "risk": {
-    "risk_percent_per_trade": 0.25,
-    "max_concurrent_trades": 1,
+    "risk_percent_per_trade": 0.5,
+    "max_concurrent_trades": 4,
+    "farmer_reserve": { "slots": 1, "risk_pct": 0.2 },
     "sl_min_atr": 0.5,
     "tp_atr_multipliers": [
       0.3,
@@ -18,12 +19,12 @@
     "move_sl_to_be_after_tp1": true,
     "symbol_caps": {
       "XAUUSDm": {
-        "daily_loss_limit_pct": 80.0,
-        "max_open_risk_pct": 50.0
+        "daily_loss_limit_pct": 2.0,
+        "max_open_risk_pct": 1.0
       },
       "US30m": {
-        "daily_loss_limit_pct": 5.0,
-        "max_open_risk_pct": 6.0
+        "daily_loss_limit_pct": 2.0,
+        "max_open_risk_pct": 1.0
       }
     },
     "progressive_defense": {
@@ -31,26 +32,24 @@
       "loss_tiers": [
         {
           "realized_loss_pct": 0,
-          "position_size_mult": 1.0,
+          "position_size_mult": 1,
           "label": "Normal"
         },
         {
-          "realized_loss_pct": 2,
+          "realized_loss_pct": 1,
           "position_size_mult": 0.5,
-          "label": "50% size after -2%"
+          "label": "Half size"
         },
         {
-          "realized_loss_pct": 3,
-          "position_size_mult": 0.25,
-          "label": "25% size after -3%"
-        },
-        {
-          "realized_loss_pct": 4,
-          "position_size_mult": 0.0,
-          "label": "HALT after -4%"
+          "realized_loss_pct": 2,
+          "position_size_mult": 0,
+          "label": "Daily halt"
         }
       ]
-    }
+    },
+    "daily_loss_limit_pct": 2.0,
+    "max_open_risk_pct": 1.0,
+    "cost_buffer_dollars": 0.15
   },
   "sessions": {
     "timezone": "Africa/Johannesburg",
@@ -94,7 +93,10 @@
     "enabled": true,
     "pre_blackout_minutes": 30,
     "post_blackout_minutes": 15,
-    "strict_blackout_for_high": true
+    "strict_blackout_for_high": true,
+    "calendar_file": "data/news_calendar.json",
+    "auto_refresh": true,
+    "refresh_seconds": 3600
   },
   "strategy_guards": {
     "nyupip_active_window_enabled": false,
@@ -116,7 +118,7 @@
   },
   "execution": {
     "enabled": true,
-    "demo_only": false,
+    "demo_only": true,
     "slippage_points": 100,
     "deviation_points": 180,
     "campaign_window_minutes": 5,
@@ -131,7 +133,14 @@
     "max_position_minutes": {
       "LOW": 10,
       "MEDIUM": 10,
-      "HIGH": 20
+      "HIGH": 20,
+      "FARMER": 10,
+      "ICT_ATM": 120,
+      "ICT_SWING": 120,
+      "1HSMA": 120,
+      "CIS": 60,
+      "RECOVERED": null,
+      "EVENT": 10
     },
     "high_tier_tp_pips": {
       "tier1_count": 1,
@@ -143,19 +152,26 @@
     "medium_tp_primary_pips": 7,
     "farmer": {
       "enabled": true,
-      "tp_pips": 2,
-      "sl_pips": 18,
-      "trades_per_cycle": 3,
+      "target_profit_dollars": 2.0,
+      "max_loss_dollars": 2.0,
+      "risk_percent_per_trade": 0.2,
+      "daily_loss_dollars": 5.0,
+      "cooldown_seconds": 120,
+      "estimated_round_trip_cost_dollars": 0.15,
+      "min_net_reward_risk": 1.0,
+      "max_cost_target_fraction": 0.25,
       "cycle_seconds": 30,
-      "dynamic_tp": true
+      "trades_per_cycle": 1
     },
     "loss_minimizer": {
-      "enabled": true,
+      "enabled": false,
       "soft_loss_dollars": 3.0,
       "max_loss_dollars": 11.0,
       "retrace_points": 10,
       "improvement_window_seconds": 20
-    }
+    },
+    "max_quote_age_seconds": 15,
+    "max_entry_drift_points": 50
   },
   "notifications": {
     "telegram_enabled": false,
@@ -168,7 +184,8 @@
     "rotate_megabytes": 10,
     "retain_days": 7,
     "heartbeat_minutes": 5,
-    "dashboard_access_logs": false
+    "dashboard_access_logs": false,
+    "strategy_decisions": true
   },
   "secrets_env": {
     "mt5_password_env": "MT5_PASSWORD"

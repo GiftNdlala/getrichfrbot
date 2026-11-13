@@ -20,9 +20,13 @@ from uuid import uuid4
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(__file__))
 
-from indicators import TechnicalIndicators
-from signal_generator import SignalGenerator
+from .indicators import TechnicalIndicators
+from .signal_generator import SignalGenerator
 from .config import get_config
+from .market_data import broker_frame, utc_timestamp, confirmed_retest
+from .risk_controls import news_reason
+from .runtime_logging import emit
+from .strategies.farmer import FarmerStrategy
 try:
     from .mt5_connector import MT5Connector
 except ImportError:
@@ -99,7 +103,7 @@ class LiveSignal:
     alert_level: str  # "HIGH", "MEDIUM", "LOW", "HOLD"
     alert_color: str  # Color code for UI
     target_pips: int  # Target pips for this signal category
-    success_rate: float  # Expected success rate percentage
+    success_rate: Optional[float]  # Unmeasured until calibrated against broker outcomes
     
     # Risk Management Details
     entry_price: float
@@ -160,6 +164,7 @@ class LiveDataStream:
         self.update_interval = update_interval
         self.indicators = TechnicalIndicators()
         self.signal_generator = SignalGenerator()
+        self.farmer_strategy = FarmerStrategy()
         
         # Config
         self.config = get_config()
@@ -328,7 +333,19 @@ class LiveDataStream:
             print(message, flush=True)
 
     def _log_trade(self, message: str):
-        print(message, file=sys.__stdout__ or sys.stdout, flush=True)
+        emit(message)
+
+    def _report_strategy(self, strategy, status, reason, details=None):
+        if not hasattr(self, 'strategy_decisions'):
+            self.strategy_decisions = {}
+            self._strategy_log_times = {}
+        key = (status, reason)
+        previous = self.strategy_decisions.get(strategy, {})
+        self.strategy_decisions[strategy] = {'status':status,'reason':reason,'updated_at':datetime.utcnow().isoformat()+'Z','details':details or {}}
+        now = time.monotonic()
+        if (key != (previous.get('status'),previous.get('reason')) or now-self._strategy_log_times.get(strategy,0) >= 60) and self.config.get('logging',{}).get('strategy_decisions',True):
+            self._log_trade(f"STRATEGY [{self.symbol}/{strategy}] {status.upper()}: {reason}")
+            self._strategy_log_times[strategy] = now
 
     def _quote_audit_fields(
         self,
@@ -344,10 +361,10 @@ class LiveDataStream:
             'signal_id': signal_id,
             'signal_price': signal_price,
             'data_source': quote.get('source'),
-            'bid': quote.get('bid'),
-            'ask': quote.get('ask'),
-            'point': quote.get('point'),
-            'spread_points': quote.get('spread_points'),
+            'bid': trade.get('bid', quote.get('bid')),
+            'ask': trade.get('ask', quote.get('ask')),
+            'point': trade.get('point', quote.get('point')),
+            'spread_points': trade.get('spread_points', quote.get('spread_points')),
             'setup_id': setup_id,
             'magic': trade.get('magic'),
             'order_comment': trade.get('order_comment'),
@@ -781,32 +798,22 @@ class LiveDataStream:
         }
     
     def _update_historical_data(self, current_quote: Dict):
-        """Update historical data with new quote"""
-        # Session/blackout gating (minimal): if blocked, skip adding tradeable signal but keep data
-        if self._is_blackout_or_off_session():
-            pass
-        new_row = pd.DataFrame({
-            'Open': [current_quote['price']],
-            'High': [current_quote['price']],
-            'Low': [current_quote['price']],
-            'Close': [current_quote['price']],
-            'Volume': [current_quote['volume']]
-        }, index=[current_quote['timestamp']])
-        
-        # Add to historical data
-        self.historical_data = pd.concat([self.historical_data, new_row])
-
-        # Keep only recent window for fast indicator recalculation
-        if len(self.historical_data) > self._history_limit_default:
-            self.historical_data = self.historical_data.tail(self._history_limit_default)
-
-        # Recalculate indicators
+        """Refresh real completed M1 bars, replacing the current broker snapshot."""
+        if self.autotrader:
+            self.autotrader.market_context = {}
+        if current_quote.get('source') != 'MT5' or not self.mt5:
+            raise ValueError('BROKER_DATA_REQUIRED')
+        import MetaTrader5 as mt5
+        # Fetch the full bounded buffer after gaps/restarts; no quote-derived candles.
+        rates = self.mt5.get_rates(mt5.TIMEFRAME_M1, self._nyupip_history_limit + 1)
+        bars = broker_frame(rates, current_quote['timestamp'])
+        self.nyupip_history = bars.tail(self._nyupip_history_limit)
         with self._quiet_status_stdout():
-            self.historical_data = self.indicators.calculate_all_indicators(self.historical_data)
-
-        # Maintain a deeper buffer for NYUPIP strategy analysis
-        nyupip_row = new_row.reindex(columns=["Open", "High", "Low", "Close", "Volume"])
-        self._update_nyupip_history(nyupip_row)
+            self.historical_data = self.indicators.calculate_all_indicators(bars.tail(self._history_limit_default).copy())
+        if self.autotrader:
+            self.autotrader.market_context = dict(current_quote, history_ready=True, audit_ready=False,
+                ignore_session_filter=self.ignore_session_filter,
+                normal_spread_points=self.spread_analyzer.get_normal_spread() if self.spread_analyzer else None)
 
     def _update_nyupip_history(self, row: pd.DataFrame):
         """Keep a long-running buffer of raw OHLC data for NYUPIP analysis."""
@@ -962,7 +969,7 @@ class LiveDataStream:
             'risk_reward_ratio': 1.0,
             'atr_value': 20.0,
             'position_size_percent': 2.0,
-            'risk_amount_dollars': 200.0,
+            'risk_amount_dollars': 0.0,
             'potential_profit_tp1': 0.0,
             'potential_profit_tp2': 0.0,
             'potential_profit_tp3': 0.0
@@ -1026,43 +1033,19 @@ class LiveDataStream:
             else:
                 risk_reward_ratio = 1.0
             
-            # Adaptive position sizing based on alert level
-            account_balance = 10000  # Assume $10K account
-            
-            # Risk percentage based on alert level
-            if alert_category['alert_level'] == 'HIGH':
-                risk_percentage = 0.015  # 1.5% for high-risk, high-reward trades
-            elif alert_category['alert_level'] == 'MEDIUM':
-                risk_percentage = 0.02   # 2.0% for medium trades
-            else:  # LOW
-                risk_percentage = 0.025  # 2.5% for conservative, high-success trades
-            
-            risk_per_trade = account_balance * risk_percentage
-            
-            if signal != 0:
-                risk_per_share = abs(entry_price - stop_loss)
-                if risk_per_share > 0:
-                    position_size_dollars = risk_per_trade / risk_per_share
-                    position_size_percent = (position_size_dollars / account_balance) * 100
-                else:
-                    position_size_percent = risk_percentage * 100
-                    position_size_dollars = account_balance * risk_percentage
-            else:
-                position_size_percent = 0.0
-                position_size_dollars = 0.0
-            
-            # Calculate potential profits
-            if signal == 1:  # BUY
-                potential_profit_tp1 = (take_profit_1 - entry_price) * (position_size_dollars / entry_price)
-                potential_profit_tp2 = (take_profit_2 - entry_price) * (position_size_dollars / entry_price)
-                potential_profit_tp3 = (take_profit_3 - entry_price) * (position_size_dollars / entry_price)
-            elif signal == -1:  # SELL
-                potential_profit_tp1 = (entry_price - take_profit_1) * (position_size_dollars / entry_price)
-                potential_profit_tp2 = (entry_price - take_profit_2) * (position_size_dollars / entry_price)
-                potential_profit_tp3 = (entry_price - take_profit_3) * (position_size_dollars / entry_price)
-            else:
-                potential_profit_tp1 = potential_profit_tp2 = potential_profit_tp3 = 0.0
-            
+            # A budget scenario for the dashboard, not a fill or a $10k assumption.
+            equity = self.mt5.get_equity() if self.mt5 else None
+            account_balance = float(equity) if equity and np.isfinite(equity) else 0.0
+            risk_percentage = float(self.config.get('risk', {}).get('risk_percent_per_trade', 0.25)) / 100.0
+            risk_per_trade = account_balance * risk_percentage if signal != 0 else 0.0
+            position_size_percent = risk_percentage * 100 if signal != 0 else 0.0
+            price_risk = abs(entry_price-stop_loss)
+            def budget_reward(target):
+                return risk_per_trade * max(0.0, (target-entry_price)*signal) / price_risk if price_risk > 0 else 0.0
+            potential_profit_tp1 = budget_reward(take_profit_1)
+            potential_profit_tp2 = budget_reward(take_profit_2)
+            potential_profit_tp3 = budget_reward(take_profit_3)
+
             # Update risk management dictionary
             risk_mgmt.update({
                 'entry_price': entry_price,
@@ -1072,7 +1055,7 @@ class LiveDataStream:
                 'take_profit_3': take_profit_3,
                 'risk_reward_ratio': risk_reward_ratio,
                 'position_size_percent': min(position_size_percent, 10.0),  # Cap at 10%
-                'risk_amount_dollars': min(risk_per_trade, 500),  # Cap at $500
+                'risk_amount_dollars': risk_per_trade,  # Cap at $500
                 'potential_profit_tp1': potential_profit_tp1,
                 'potential_profit_tp2': potential_profit_tp2,
                 'potential_profit_tp3': potential_profit_tp3
@@ -1149,7 +1132,7 @@ class LiveDataStream:
             alert_level=alert_category['alert_level'],
             alert_color=alert_category['alert_color'],
             target_pips=alert_category['target_pips'],
-            success_rate=alert_category['success_rate'],
+            success_rate=None,
             
             # Risk Management Parameters
             entry_price=risk_mgmt['entry_price'],
@@ -1258,6 +1241,8 @@ class LiveDataStream:
             ):
                 try:
                     # Fetch current quote
+                    if self.autotrader:
+                        self.autotrader.market_context = {}
                     current_quote = self._fetch_current_quote()
                     if current_quote:
                         self._last_quote = dict(current_quote)
@@ -1320,6 +1305,8 @@ class LiveDataStream:
                         if self.persistence:
                             try:
                                 self.persistence.save_signal(asdict(live_signal))
+                                if self.autotrader:
+                                    self.autotrader.market_context['audit_ready'] = True
                             except Exception as e:
                                 self._log_status(f"⚠️ Persist error: {e}")
                         
@@ -1351,6 +1338,7 @@ class LiveDataStream:
                                         strategy_tag="EVENT"
                                     )
                                     if trade:
+                                        sl, tp = trade['sl'], trade['tp']
                                         self._log_trade(f"ORDER SENT [EVENT]: ticket={trade.get('ticket')} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={tp:.2f}")
                                     if trade and self.persistence:
                                         self.persistence.save_trade({
@@ -1391,276 +1379,12 @@ class LiveDataStream:
                             except Exception as e:
                                 self._log_status(f"⚠️ Event engine error: {e}")
 
-                        # Auto-trading (opt-in) with campaign and per-alert logic
-                        if (
-                            self.autotrader
-                            and self.autotrader.enabled
-                            and self.trading_enabled
-                            and live_signal.signal != 0
-                            and not self._is_blackout_or_off_session()
-                            and not spread_block
-                            and not atr_block
-                            and not self.event_mode_enabled
-                        ):
-                            # Respect per-symbol daily loss cap halt
-                            if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
-                                self._log_status(f"⏸️ Halt new orders (daily cap) for {self.symbol}")
-                                continue
-                            level = (live_signal.alert_level or 'LOW').upper()
-                            side = 1 if live_signal.signal == 1 else -1
-                            engine_mode = getattr(self, 'engine_mode', 'ALL')
-                            general_allowed = True
-                            farmer_allowed = self.farmer_enabled
+                        try:
+                            self._process_farmer(current_quote, spread_block, atr_block)
+                        except Exception as exc:
+                            self._report_strategy('FARMER','error',str(exc))
 
-                            if engine_mode == 'NONE':
-                                general_allowed = False
-                                farmer_allowed = False
-                            elif engine_mode == 'FARMER_ONLY':
-                                general_allowed = False
-                            elif engine_mode == 'LOW_ONLY':
-                                general_allowed = (level == 'LOW')
-                                farmer_allowed = False
-                            elif engine_mode == 'MEDIUM_ONLY':
-                                general_allowed = (level == 'MEDIUM')
-                                farmer_allowed = False
-                            elif engine_mode == 'HIGH_ONLY':
-                                general_allowed = (level == 'HIGH')
-                                farmer_allowed = False
-                            elif engine_mode == 'EVENT_ONLY':
-                                general_allowed = False
-                                farmer_allowed = False
-
-                            if general_allowed:
-                                # Per-engine gating
-                                if level == 'LOW' and not self.enable_low:
-                                    self._log_status("⏸️ Engine gated: LOW disabled")
-                                elif level == 'MEDIUM' and not self.enable_medium:
-                                    self._log_status("⏸️ Engine gated: MEDIUM disabled")
-                                elif level == 'HIGH' and not self.enable_high:
-                                    self._log_status("⏸️ Engine gated: HIGH disabled")
-                                else:
-                                    # Additional quality gates (configurable) for HIGH/MEDIUM to reduce chop losses.
-                                    # These are designed to trade less, but cleaner.
-                                    try:
-                                        qcfg = (self.config.get('filters', {}) or {}).get('quality_gates', {}) or {}
-                                        enable_qg = bool(qcfg.get('enabled', False))
-                                    except Exception:
-                                        enable_qg = False
-                                        qcfg = {}
-
-                                    if enable_qg and level in {'HIGH', 'MEDIUM'}:
-                                        try:
-                                            # Defaults: require at least 3-4 agreeing signals out of 7 total (43-57% consensus)
-                                            # This balances quality vs. opportunity - too strict blocks good trades, too loose allows chop
-                                            min_strength = float(qcfg.get(f"min_signal_strength_{level.lower()}", 3 if level == 'HIGH' else 2))
-                                            min_vote_margin = float(qcfg.get(f"min_vote_margin_{level.lower()}", 2 if level == 'HIGH' else 1))
-                                            require_sma200 = bool(qcfg.get('require_sma200_trend', True))
-
-                                            # Ensemble vote margin: how strong the majority is
-                                            vote_margin = abs(float(getattr(live_signal, 'signal_vote_sum', 0.0)))
-                                            # Use agreeing votes (pos_votes for BUY, neg_votes for SELL) instead of total signal_strength
-                                            pos_votes = int(getattr(live_signal, 'signal_pos_votes', 0))
-                                            neg_votes = int(getattr(live_signal, 'signal_neg_votes', 0))
-                                            agreeing_votes = pos_votes if side == 1 else neg_votes
-
-                                            if agreeing_votes < min_strength:
-                                                self._log_status(f"⛔ Quality gate: {level} blocked (agreeing_votes {agreeing_votes} < {min_strength}, pos={pos_votes} neg={neg_votes})")
-                                                continue
-                                            if vote_margin < min_vote_margin:
-                                                self._log_status(f"⛔ Quality gate: {level} blocked (vote_margin {vote_margin:.1f} < {min_vote_margin})")
-                                                continue
-
-                                            # Higher-timeframe trend alignment using SMA_200 if available
-                                            if require_sma200:
-                                                try:
-                                                    sma200 = float(latest_data.get('SMA_200', float('nan')))
-                                                    price = float(latest_data.get('Close', live_signal.current_price))
-                                                    if not np.isnan(sma200):
-                                                        if side == 1 and price < sma200:
-                                                            self._log_status(f"⛔ Trend gate: {level} BUY blocked (price {price:.2f} < SMA_200 {sma200:.2f})")
-                                                            continue
-                                                        if side == -1 and price > sma200:
-                                                            self._log_status(f"⛔ Trend gate: {level} SELL blocked (price {price:.2f} > SMA_200 {sma200:.2f})")
-                                                            continue
-                                                except Exception:
-                                                    # If SMA_200 not available, don't block; avoid breaking live runs
-                                                    pass
-                                        except Exception as e:
-                                            self._log_status(f"⚠️ Quality gate error (ignored): {e}")
-
-                                    # campaign check
-                                    if self.campaign and not self.campaign.allow(self.symbol, side, level):
-                                        self._log_status(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
-                                    else:
-                                        # Determine TP by level/tiering
-                                        tp = live_signal.take_profit_1
-                                        cfg_exec = self.config.get('execution', {})
-                                        if level == 'LOW':
-                                            tp_pips = int(cfg_exec.get('low_tp_pips', 5))
-                                            tp_low_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
-                                            tp = tp_low_abs
-                                        elif level == 'MEDIUM':
-                                            tp_pips = int(cfg_exec.get('medium_tp_primary_pips', 9))
-                                            tp_med_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
-                                            tp = tp_med_abs
-                                        # HIGH: allow tiered spawning counts
-                                        tiers = []
-                                        if level == 'HIGH':
-                                            tier_cfg = cfg_exec.get('high_tier_tp_pips', { 'tier1_count':2,'tier1_pips':6,'tier2_count':3,'tier2_pips':9 })
-                                            tiers = (
-                                                [('TIER1', tier_cfg.get('tier1_pips',6))]*int(tier_cfg.get('tier1_count',2)) +
-                                                [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
-                                            )
-                                        # Spawn orders
-                                        def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None, engine: str = "INTRADAY"):
-                                            nonlocal live_signal
-                                            sl = live_signal.stop_loss
-                                            entry = live_signal.entry_price
-                                            local_tp = live_signal.take_profit_1
-                                            if tp_absolute is not None:
-                                                local_tp = tp_absolute
-                                            elif tp_pips_override is not None:
-                                                local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
-                                            trade = self.autotrader.place_market_order(
-                                                side,
-                                                entry,
-                                                sl,
-                                                local_tp,
-                                                strategy_tag=f"{engine}:{level}:{tier_name or 'BASE'}"
-                                            )
-                                            if trade:
-                                                self._log_trade(f"ORDER SENT [{engine}]: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={local_tp:.2f}")
-                                            else:
-                                                self._log_trade(f"ORDER FAILED [{engine}]: level={level} tier={tier_name or 'BASE'} symbol={self.symbol}; see MT5 error above")
-                                            if trade and self.persistence:
-                                                try:
-                                                    self.persistence.save_trade({
-                                                        'timestamp': live_signal.timestamp,
-                                                        'symbol': live_signal.symbol,
-                                                        'direction': side,
-                                                        'entry': trade.get('price', entry),
-                                                        'fill_price': trade.get('price', entry),
-                                                        'sl': sl,
-                                                        'tp': local_tp,
-                                                        'lots': trade.get('volume', 0.0),
-                                                        'ticket': trade.get('ticket', 0),
-                                                        'status': 'SENT',
-                                                        'alert_level': level,
-                                                        'tier': tier_name or '',
-                                                        'engine': engine,
-                                                        **self._quote_audit_fields(
-                                                            live_signal.signal_id,
-                                                            entry,
-                                                            setup_id=f"{engine}:{level}:{tier_name or 'BASE'}",
-                                                            quote=current_quote,
-                                                            trade=trade,
-                                                        ),
-                                                    })
-                                                except Exception as e:
-                                                    self._log_status(f"⚠️ Trade persist error: {e}")
-                                            if trade and self.order_manager:
-                                                try:
-                                                    self.order_manager.register_new_order(trade.get('ticket'), side, trade.get('price', entry), sl, local_tp, level, tier=tier_name)
-                                                except Exception as e:
-                                                    self._log_status(f"Order manager {engine} error: {e}")
-                                            if trade and self.campaign:
-                                                self.campaign.record(self.symbol, side, level)
-                                        if level == 'HIGH' and tiers:
-                                            # Send tiered partials first
-                                            for tier_name, pips in tiers:
-                                                if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                                    send_one(tier_name, pips, engine="INTRADAY_HIGH")
-                                            # Remaining up to campaign limit use base TP
-                                            if not self.campaign or self.campaign.allow(self.symbol, side, level):
-                                                send_one(None, None, engine="INTRADAY_HIGH")
-                                        else:
-                                            # LOW/MEDIUM use absolute TP we computed
-                                            engine_name = "INTRADAY_LOW" if level=="LOW" else ("INTRADAY_MED" if level=="MEDIUM" else "INTRADAY")
-                                            send_one(None, None, tp_absolute=tp, engine=engine_name)
-                            else:
-                                if engine_mode == 'NONE':
-                                    self._log_status("⏸️ Engine mode NONE blocking automated entries")
-                                elif engine_mode == 'FARMER_ONLY':
-                                    self._log_status("⏸️ Engine mode FARMER_ONLY skipping tiered engines")
-                                elif engine_mode.endswith('_ONLY'):
-                                    self._log_status(f"⏸️ Engine mode {engine_mode} skipping {level} signal")
-
-                            # 2-pip farmer (runs alongside, subject to farmer cycle)
-                            try:
-                                # Farmer runs independently every cycle when a non-HOLD signal exists,
-                                # but piggybacks the HIGH campaign gate.
-                                if farmer_allowed and self.trading_enabled and live_signal.signal != 0:
-                                    now = datetime.now()
-                                    if not self._farmer_last_cycle or (now - self._farmer_last_cycle).total_seconds() >= self.farmer_cycle_seconds:
-                                        self._farmer_last_cycle = now
-                                        farmer_cfg = self.config.get('execution', {}).get('farmer', {})
-                                        # Dynamic TP by ATR if enabled
-                                        dyn = bool(farmer_cfg.get('dynamic_tp', True))
-                                        atr_val = float(self.historical_data.iloc[-1].get('ATR_14', 0)) if not self.historical_data.empty else 0
-                                        base_tp = int(farmer_cfg.get('tp_pips', 2))
-                                        if dyn:
-                                            if atr_val >= 20:
-                                                tp_pips = min(5, base_tp + 2)
-                                            elif atr_val >= 12:
-                                                tp_pips = min(4, base_tp + 1)
-                                            else:
-                                                tp_pips = base_tp
-                                        else:
-                                            tp_pips = base_tp
-                                        sl_pips = int(farmer_cfg.get('sl_pips', 6))
-                                        count = int(farmer_cfg.get('trades_per_cycle', 3))
-                                        # place burst of small TP orders
-                                        for i in range(count):
-                                            # piggyback HIGH gate regardless of current alert level
-                                            if self.campaign and not self.campaign.allow(self.symbol, side, 'HIGH'):
-                                                break
-                                            entry = live_signal.entry_price
-                                            sl = entry - sl_pips if side == 1 else entry + sl_pips
-                                            tp_small = entry + tp_pips if side == 1 else entry - tp_pips
-                                            trade = self.autotrader.place_market_order(
-                                                side,
-                                                entry,
-                                                sl,
-                                                tp_small,
-                                                strategy_tag=f"FARMER:{level}"
-                                            )
-                                            if trade:
-                                                self._log_trade(f"ORDER SENT [FARMER]: ticket={trade.get('ticket')} lots={trade.get('volume')} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={tp_small:.2f}")
-                                            if trade and self.persistence:
-                                                try:
-                                                    self.persistence.save_trade({
-                                                        'timestamp': live_signal.timestamp,
-                                                        'symbol': live_signal.symbol,
-                                                        'direction': side,
-                                                        'entry': trade.get('price', entry),
-                                                        'fill_price': trade.get('price', entry),
-                                                        'sl': sl,
-                                                        'tp': tp_small,
-                                                        'lots': trade.get('volume', 0.0),
-                                                        'ticket': trade.get('ticket', 0),
-                                                        'status': 'SENT',
-                                                        'alert_level': 'HIGH',
-                                                        'tier': 'FARMER',
-                                                        'engine': 'FARMER',
-                                                        **self._quote_audit_fields(
-                                                            live_signal.signal_id,
-                                                            entry,
-                                                            setup_id='FARMER',
-                                                            quote=current_quote,
-                                                            trade=trade,
-                                                        ),
-                                                    })
-                                                except Exception as e:
-                                                    self._log_status(f"⚠️ Farmer persist error: {e}")
-                                            if trade and self.order_manager:
-                                                try:
-                                                    self.order_manager.register_new_order(trade.get('ticket'), side, trade.get('price', entry), sl, tp_small, 'HIGH', tier='FARMER')
-                                                except Exception as e:
-                                                    self._log_status(f"Order manager FARMER error: {e}")
-                                            if trade and self.campaign:
-                                                self.campaign.record(self.symbol, side, 'HIGH')
-                            except Exception as e:
-                                self._log_trade(f"FARMER ERROR: symbol={self.symbol} error={e}")
+                        self._process_intraday(live_signal, spread_block, atr_block)
 
                         if self.nyupip_enabled:
                             try:
@@ -1678,6 +1402,7 @@ class LiveDataStream:
                                 diag = self.nyupip_state.get('last_diagnostics', {})
                                 status = diag.get('status', 'unknown')
                                 reason = diag.get('reason', 'no_reason')
+                                self._report_strategy('NYUPIP', status, reason or 'evaluating', diag.get('modules'))
                                 
                                 if nyupip_signals:
                                     self._log_status(f"✅ [{eval_time}] NYUPIP: {len(nyupip_signals)} signal(s) generated | Status: {status}")
@@ -1702,7 +1427,8 @@ class LiveDataStream:
                                         self._log_status(f"   └─ Zone: {zone_status} | ATR: {atr_status} | Trendline: {trendline_status}")
                                         
                             except Exception as e:
-                                self._log_status(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] NYUPIP processing error: {e}")
+                                self._report_strategy('NYUPIP', 'error', str(e))
+                                self.nyupip_state['last_diagnostics'] = {'status':'error','reason':str(e)}
 
                         strategy_history = None
                         try:
@@ -1731,6 +1457,7 @@ class LiveDataStream:
                                 
                                 status = swing_diag.get('status', 'unknown')
                                 reason = swing_diag.get('reason', 'no_reason')
+                                self._report_strategy('ICT_SWING', status, reason or 'evaluating')
                                 
                                 if swing_signals:
                                     self._log_status(f"✅ [{eval_time}] ICT Swing: {len(swing_signals)} signal(s) generated | Status: {status}")
@@ -1752,7 +1479,7 @@ class LiveDataStream:
                                             self._log_status(f"   └─ Asian: {asian.get('open', 'N/A')} | London: {london.get('open', 'N/A')} | NY: {ny.get('open', 'N/A')}")
                                         
                             except Exception as e:
-                                self._log_status(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT Swing processing error: {e}")
+                                self._report_strategy('ICT_SWING', 'error', str(e))
 
                         if self.ict_atm_enabled and self.ict_atm_strategy and self._is_gold_symbol():
                             try:
@@ -1768,6 +1495,7 @@ class LiveDataStream:
                                 
                                 status = atm_diag.get('status', 'unknown')
                                 reason = atm_diag.get('reason', 'no_reason')
+                                self._report_strategy('ICT_ATM', status, reason or 'evaluating')
                                 
                                 if atm_signals:
                                     self._log_status(f"✅ [{eval_time}] ICT ATM: {len(atm_signals)} signal(s) generated | Status: {status}")
@@ -1788,7 +1516,7 @@ class LiveDataStream:
                                             self._log_status(f"   └─ ATR Current: {atr_current:.2f} | ATR Avg: {atr_avg:.2f} | Ratio: {atr_ratio:.2f}x")
                                         
                             except Exception as e:
-                                self._log_status(f"⚠️ [{datetime.now().strftime('%H:%M:%S')}] ICT ATM processing error: {e}")
+                                self._report_strategy('ICT_ATM', 'error', str(e))
                         
                     else:
                         self._log_status("⚠️ Failed to fetch current quote")
@@ -1796,15 +1524,14 @@ class LiveDataStream:
                 except Exception as e:
                     self._log_status(f"❌ Error in streaming loop: {e}")
                 
-                # Reconcile positions periodically
-                try:
-                    if self.order_manager:
-                        self.order_manager.reconcile()
-                except Exception:
-                    pass
-                # Wait for next update
-                stop_event.wait(self.update_interval)
-        
+                finally:
+                    try:
+                        if self.order_manager:
+                            self.order_manager.reconcile()
+                    except Exception as exc:
+                        self._log_trade(f"RECONCILE ERROR: symbol={self.symbol} error={exc}")
+                    stop_event.wait(self.update_interval)
+
         # Start streaming in background thread
         self.stream_thread = threading.Thread(
             target=stream_loop,
@@ -1813,6 +1540,276 @@ class LiveDataStream:
         )
         self.stream_thread.start()
     
+    def _process_intraday(self, live_signal, spread_block, atr_block):
+        current_quote = self._last_quote
+        latest_data = self.historical_data.iloc[-1] if not self.historical_data.empty else pd.Series(dtype=float)
+        # Auto-trading (opt-in) with campaign and per-alert logic
+        if (
+            self.autotrader
+            and self.autotrader.enabled
+            and self.trading_enabled
+            and live_signal.signal != 0
+            and not self._is_blackout_or_off_session()
+            and not spread_block
+            and not atr_block
+            and not self.event_mode_enabled
+        ):
+            # Respect per-symbol daily loss cap halt
+            if self.order_manager and getattr(self.order_manager, 'halt_new_orders', False):
+                self._log_status(f"⏸️ Halt new orders (daily cap) for {self.symbol}")
+                return
+            level = (live_signal.alert_level or 'LOW').upper()
+            side = 1 if live_signal.signal == 1 else -1
+            engine_mode = getattr(self, 'engine_mode', 'ALL')
+            general_allowed = True
+            farmer_allowed = self.farmer_enabled
+
+            if engine_mode == 'NONE':
+                general_allowed = False
+                farmer_allowed = False
+            elif engine_mode == 'FARMER_ONLY':
+                general_allowed = False
+            elif engine_mode == 'LOW_ONLY':
+                general_allowed = (level == 'LOW')
+                farmer_allowed = False
+            elif engine_mode == 'MEDIUM_ONLY':
+                general_allowed = (level == 'MEDIUM')
+                farmer_allowed = False
+            elif engine_mode == 'HIGH_ONLY':
+                general_allowed = (level == 'HIGH')
+                farmer_allowed = False
+            elif engine_mode == 'EVENT_ONLY':
+                general_allowed = False
+                farmer_allowed = False
+
+            if general_allowed:
+                # Per-engine gating
+                if level == 'LOW' and not self.enable_low:
+                    self._log_status("⏸️ Engine gated: LOW disabled")
+                elif level == 'MEDIUM' and not self.enable_medium:
+                    self._log_status("⏸️ Engine gated: MEDIUM disabled")
+                elif level == 'HIGH' and not self.enable_high:
+                    self._log_status("⏸️ Engine gated: HIGH disabled")
+                else:
+                    # Additional quality gates (configurable) for HIGH/MEDIUM to reduce chop losses.
+                    # These are designed to trade less, but cleaner.
+                    try:
+                        qcfg = (self.config.get('filters', {}) or {}).get('quality_gates', {}) or {}
+                        enable_qg = bool(qcfg.get('enabled', False))
+                    except Exception:
+                        enable_qg = False
+                        qcfg = {}
+
+                    if enable_qg and level in {'HIGH', 'MEDIUM'}:
+                        try:
+                            # Defaults: require at least 3-4 agreeing signals out of 7 total (43-57% consensus)
+                            # This balances quality vs. opportunity - too strict blocks good trades, too loose allows chop
+                            min_strength = float(qcfg.get(f"min_signal_strength_{level.lower()}", 3 if level == 'HIGH' else 2))
+                            min_vote_margin = float(qcfg.get(f"min_vote_margin_{level.lower()}", 2 if level == 'HIGH' else 1))
+                            require_sma200 = bool(qcfg.get('require_sma200_trend', True))
+
+                            # Ensemble vote margin: how strong the majority is
+                            vote_margin = abs(float(getattr(live_signal, 'signal_vote_sum', 0.0)))
+                            # Use agreeing votes (pos_votes for BUY, neg_votes for SELL) instead of total signal_strength
+                            pos_votes = int(getattr(live_signal, 'signal_pos_votes', 0))
+                            neg_votes = int(getattr(live_signal, 'signal_neg_votes', 0))
+                            agreeing_votes = pos_votes if side == 1 else neg_votes
+
+                            if agreeing_votes < min_strength:
+                                self._log_status(f"⛔ Quality gate: {level} blocked (agreeing_votes {agreeing_votes} < {min_strength}, pos={pos_votes} neg={neg_votes})")
+                                return
+                            if vote_margin < min_vote_margin:
+                                self._log_status(f"⛔ Quality gate: {level} blocked (vote_margin {vote_margin:.1f} < {min_vote_margin})")
+                                return
+
+                            # Higher-timeframe trend alignment using SMA_200 if available
+                            if require_sma200:
+                                try:
+                                    sma200 = float(latest_data.get('SMA_200', float('nan')))
+                                    price = float(latest_data.get('Close', live_signal.current_price))
+                                    if not np.isnan(sma200):
+                                        if side == 1 and price < sma200:
+                                            self._log_status(f"⛔ Trend gate: {level} BUY blocked (price {price:.2f} < SMA_200 {sma200:.2f})")
+                                            return
+                                        if side == -1 and price > sma200:
+                                            self._log_status(f"⛔ Trend gate: {level} SELL blocked (price {price:.2f} > SMA_200 {sma200:.2f})")
+                                            return
+                                except Exception:
+                                    # If SMA_200 not available, don't block; avoid breaking live runs
+                                    pass
+                        except Exception as e:
+                            self._log_status(f"⚠️ Quality gate error (ignored): {e}")
+
+                    # campaign check
+                    if self.campaign and not self.campaign.allow(self.symbol, side, level):
+                        self._log_status(f"⛔ Campaign limit reached for {level} {('BUY' if side==1 else 'SELL')}")
+                    else:
+                        # Determine TP by level/tiering
+                        tp = live_signal.take_profit_1
+                        cfg_exec = self.config.get('execution', {})
+                        if level == 'LOW':
+                            tp_pips = int(cfg_exec.get('low_tp_pips', 5))
+                            tp_low_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                            tp = tp_low_abs
+                        elif level == 'MEDIUM':
+                            tp_pips = int(cfg_exec.get('medium_tp_primary_pips', 9))
+                            tp_med_abs = live_signal.entry_price + (tp_pips if side==1 else -tp_pips)
+                            tp = tp_med_abs
+                        # HIGH: allow tiered spawning counts
+                        tiers = []
+                        if level == 'HIGH':
+                            tier_cfg = cfg_exec.get('high_tier_tp_pips', { 'tier1_count':2,'tier1_pips':6,'tier2_count':3,'tier2_pips':9 })
+                            tiers = (
+                                [('TIER1', tier_cfg.get('tier1_pips',6))]*int(tier_cfg.get('tier1_count',2)) +
+                                [('TIER2', tier_cfg.get('tier2_pips',9))]*int(tier_cfg.get('tier2_count',3))
+                            )
+                        # Spawn orders
+                        def send_one(tier_name: Optional[str], tp_pips_override: Optional[int], tp_absolute: Optional[float] = None, engine: str = "INTRADAY"):
+                            nonlocal live_signal
+                            sl = live_signal.stop_loss
+                            entry = live_signal.entry_price
+                            local_tp = live_signal.take_profit_1
+                            if tp_absolute is not None:
+                                local_tp = tp_absolute
+                            elif tp_pips_override is not None:
+                                local_tp = entry + (tp_pips_override if side==1 else -tp_pips_override)
+                            trade = self.autotrader.place_market_order(
+                                side,
+                                entry,
+                                sl,
+                                local_tp,
+                                strategy_tag=f"{engine}:{level}:{tier_name or 'BASE'}"
+                            )
+                            if trade:
+                                sl, local_tp = trade['sl'], trade['tp']
+                                self._log_trade(f"ORDER SENT [{engine}]: ticket={trade.get('ticket')} lots={trade.get('volume')} tier={tier_name or 'BASE'} entry={trade.get('price', entry):.2f} sl={sl:.2f} tp={local_tp:.2f}")
+                            else:
+                                self._log_trade(f"ORDER {str(getattr(self.autotrader, 'last_outcome', None) or 'not_sent').upper()} [{engine}]: level={level} tier={tier_name or 'BASE'} symbol={self.symbol} reason={self.autotrader.last_rejection or 'NO_EXECUTION_RESULT'}")
+                                self._report_strategy(engine, getattr(self.autotrader, 'last_outcome', None) or 'blocked', self.autotrader.last_rejection or 'NO_EXECUTION_RESULT')
+                            if trade and self.persistence:
+                                try:
+                                    self.persistence.save_trade({
+                                        'timestamp': live_signal.timestamp,
+                                        'symbol': live_signal.symbol,
+                                        'direction': side,
+                                        'entry': trade.get('price', entry),
+                                        'fill_price': trade.get('price', entry),
+                                        'sl': sl,
+                                        'tp': local_tp,
+                                        'lots': trade.get('volume', 0.0),
+                                        'ticket': trade.get('ticket', 0),
+                                        'status': 'SENT',
+                                        'alert_level': level,
+                                        'tier': tier_name or '',
+                                        'engine': engine,
+                                        **self._quote_audit_fields(
+                                            live_signal.signal_id,
+                                            entry,
+                                            setup_id=f"{engine}:{level}:{tier_name or 'BASE'}",
+                                            quote=current_quote,
+                                            trade=trade,
+                                        ),
+                                    })
+                                except Exception as e:
+                                    self._log_status(f"⚠️ Trade persist error: {e}")
+                            if trade and self.order_manager:
+                                try:
+                                    self.order_manager.register_new_order(trade.get('ticket'), side, trade.get('price', entry), sl, local_tp, level, tier=tier_name)
+                                except Exception as e:
+                                    self._log_status(f"Order manager {engine} error: {e}")
+                            if trade and self.campaign:
+                                self.campaign.record(self.symbol, side, level)
+                        if level == 'HIGH' and tiers:
+                            # Send tiered partials first
+                            for tier_name, pips in tiers:
+                                if not self.campaign or self.campaign.allow(self.symbol, side, level):
+                                    send_one(tier_name, pips, engine="INTRADAY_HIGH")
+                            # Remaining up to campaign limit use base TP
+                            if not self.campaign or self.campaign.allow(self.symbol, side, level):
+                                send_one(None, None, engine="INTRADAY_HIGH")
+                        else:
+                            # LOW/MEDIUM use absolute TP we computed
+                            engine_name = "INTRADAY_LOW" if level=="LOW" else ("INTRADAY_MED" if level=="MEDIUM" else "INTRADAY")
+                            send_one(None, None, tp_absolute=tp, engine=engine_name)
+            else:
+                if engine_mode == 'NONE':
+                    self._log_status("⏸️ Engine mode NONE blocking automated entries")
+                elif engine_mode == 'FARMER_ONLY':
+                    self._log_status("⏸️ Engine mode FARMER_ONLY skipping tiered engines")
+                elif engine_mode.endswith('_ONLY'):
+                    self._log_status(f"⏸️ Engine mode {engine_mode} skipping {level} signal")
+
+
+    def _process_farmer(self, quote, spread_block, atr_block):
+        if not self.farmer_enabled:
+            return
+        def blocked(reason):
+            self._report_strategy('FARMER','blocked',reason)
+            self.farmer_strategy.diagnostics['order_blocker'] = reason
+        if not self.trading_enabled:
+            blocked('TRADING_NOT_ARMED')
+            return
+        if not self.autotrader or not self.autotrader.enabled:
+            blocked('EXECUTOR_UNAVAILABLE')
+            return
+        if self.event_mode_enabled:
+            blocked('EVENT_MODE_ACTIVE')
+            return
+        if self.engine_mode not in {'ALL','FARMER_ONLY'}:
+            blocked('ENGINE_MODE_EXCLUDES_FARMER')
+            return
+        if self._is_blackout_or_off_session():
+            blocked('OUTSIDE_SESSION')
+            return
+        if spread_block or atr_block:
+            blocked('SPREAD_CAP' if spread_block else 'ATR_FLOOR')
+            return
+        if not self.persistence:
+            blocked('AUDIT_STORAGE_REQUIRED')
+            return
+        candidate = self.farmer_strategy.evaluate(self._get_nyupip_history())
+        if not candidate:
+            self._report_strategy('FARMER','hold',self.farmer_strategy.diagnostics.get('reason','waiting_for_completed_bar'),self.farmer_strategy.diagnostics)
+            return
+        candidate['setup_id'] = f"{self.config.get('broker', {}).get('login')}:{candidate['setup_id']}"
+        if self.persistence.setup_was_traded(self.symbol, candidate['setup_id']):
+            self.farmer_strategy.diagnostics['reason'] = 'setup_already_traded'
+            self._report_strategy('FARMER','hold','setup_already_traded')
+            return
+        side, sl = candidate['direction'], candidate['sl']
+        entry = float(quote['ask'] if side == 1 else quote['bid'])
+        if (entry - sl) * side <= 0:
+            blocked('STOP_OR_TARGET_WRONG_SIDE')
+            return
+        signal_id = str(uuid4())
+        self.persistence.save_signal({
+            'timestamp': utc_timestamp(quote['timestamp']).isoformat(), 'symbol': self.symbol,
+            'signal': side, 'signal_type': 'BUY' if side == 1 else 'SELL',
+            'current_price': entry, 'entry_price': entry, 'stop_loss': sl,
+            'alert_level': 'FARMER',
+            **self._quote_audit_fields(signal_id, entry, candidate['setup_id'], quote),
+        })
+        # Executor converts target ACCOUNT dollars into a broker price after sizing.
+        trade = self.autotrader.place_market_order(side, entry, sl, entry + side * abs(entry-sl), strategy_tag='FARMER')
+        if not trade:
+            self.farmer_strategy.diagnostics['order_blocker'] = self.autotrader.last_rejection
+            self._report_strategy('FARMER',getattr(self.autotrader,'last_outcome',None) or 'blocked',self.autotrader.last_rejection or 'NO_EXECUTION_RESULT')
+            return
+        self.farmer_strategy.diagnostics = {'reason': 'position_opened', 'ticket': trade['ticket']}
+        self._report_strategy('FARMER','filled','position_opened')
+        self._farmer_last_cycle = datetime.now()
+        sl, tp = trade['sl'], trade['tp']
+        self.persistence.save_trade({
+            'timestamp': utc_timestamp(quote['timestamp']).isoformat(), 'symbol': self.symbol,
+            'direction': side, 'entry': trade['price'], 'fill_price': trade['price'],
+            'sl': sl, 'tp': tp, 'lots': trade['volume'], 'ticket': trade['ticket'],
+            'status': 'SENT', 'alert_level': 'FARMER', 'tier': 'FARMER', 'engine': 'FARMER',
+            **self._quote_audit_fields(signal_id, entry, candidate['setup_id'], quote, trade),
+        })
+        if self.order_manager:
+            self.order_manager.register_new_order(trade['ticket'], side, trade['price'], sl, tp, 'FARMER', tier='FARMER')
+        self._log_trade(f"ORDER SENT [FARMER]: ticket={trade['ticket']} entry={trade['price']} sl={sl} tp={tp}")
+
     def stop_streaming(self):
         """Stop the live data streaming"""
         with self._stream_lock:
@@ -1845,7 +1842,11 @@ class LiveDataStream:
             'update_interval': self.update_interval,
             'current_signal': asdict(self.current_signal) if self.current_signal else None,
             'farmer_enabled': self.farmer_enabled,
-            'farmer_next_in_seconds': next_in,
+            'farmer_diagnostics': dict(self.farmer_strategy.diagnostics),
+            'strategy_decisions': getattr(self, 'strategy_decisions', {}),
+            'news_calendar_blocker': news_reason(self.config.get('news',{}),time.time()),
+            'last_execution_blocker': (self.autotrader.last_rejection or news_reason(self.config.get('news', {}), time.time())) if self.autotrader else 'EXECUTOR_UNAVAILABLE',
+            'farmer_next_in_seconds': None,
             'engine_low_enabled': self.enable_low,
             'engine_medium_enabled': self.enable_medium,
             'engine_high_enabled': self.enable_high,
@@ -1897,7 +1898,11 @@ class LiveDataStream:
             self.enable_medium = True
             self.enable_high = True
             self.event_mode_enabled = False
-            self.farmer_enabled = self._farmer_default_enabled
+            self.farmer_enabled = True
+            if self._is_gold_symbol():
+                self.set_nyupip_enabled(True)
+                self.set_ict_swing_enabled(True)
+                self.set_ict_atm_enabled(True)
         elif mode == 'NONE':
             self.enable_low = False
             self.enable_medium = False
@@ -2011,6 +2016,9 @@ class LiveDataStream:
         atr_block: bool,
         current_quote: Optional[Dict[str, float]] = None,
     ):
+        if self.engine_mode in {'NONE','FARMER_ONLY','LOW_ONLY','MEDIUM_ONLY','EVENT_ONLY'}:
+            self._report_strategy('NYUPIP','blocked','ENGINE_MODE_EXCLUDES_NYUPIP')
+            return
         payload = signal.to_payload()
         signal_id = str(uuid4())
         quote = current_quote or self._last_quote
@@ -2138,6 +2146,8 @@ class LiveDataStream:
         if not trade:
             return
 
+        signal.stop_loss = trade['sl']
+        signal.take_profit_primary = trade['tp']
         ticket = trade.get('ticket', 0)
         self.nyupip_state['auto_last_ticket'] = ticket
         self._log_trade(f"ORDER SENT [NYUPIP-{signal.module}]: ticket={ticket} lots={trade.get('volume', 0.0)} entry={trade.get('price', signal.entry_price):.2f} sl={signal.stop_loss:.2f} tp={signal.take_profit_primary:.2f}")
@@ -2184,6 +2194,18 @@ class LiveDataStream:
                 self._log_status(f"⚠️ Order manager NYUPIP error: {exc}")
 
     def _process_ict_swing_signal(self, signal: ICTSwingSignal, spread_block: bool, atr_block: bool):
+        if not self.persistence:
+            return
+        setup_id = f"{self.config.get('broker', {}).get('login')}:ICT_SWING:{utc_timestamp(signal.timestamp).tz_convert('America/New_York').date()}:{signal.session}:{signal.direction}"
+        after = None
+        level = signal.entry_price
+        tolerance = max(0.01, abs(signal.entry_price-signal.stop_loss)*0.05)
+        if self.persistence.setup_was_traded(self.symbol, setup_id):
+            self._log_trade(f"SETUP BLOCKED [REPEAT]: {setup_id}")
+            return
+        if level is None or not confirmed_retest(self._get_nyupip_history(), signal.timestamp, level, signal.direction, tolerance, after):
+            self._log_trade(f"SETUP BLOCKED [WAITING_FOR_M1_REACTION]: {setup_id}")
+            return
         payload = signal.to_payload()
         signal_id = str(uuid4())
         self.ict_swing_state['last_signal'] = payload
@@ -2232,7 +2254,7 @@ class LiveDataStream:
                     **self._quote_audit_fields(
                         signal_id,
                         signal.entry_price,
-                        setup_id=f"ICT_SWING:{signal.session}:{signal.scenario}",
+                        setup_id=setup_id,
                     ),
                 })
             except Exception as exc:
@@ -2307,6 +2329,8 @@ class LiveDataStream:
         if not trade:
             return
 
+        signal.stop_loss = trade['sl']
+        signal.take_profit_primary = trade['tp']
         ticket = trade.get('ticket', 0)
         self.ict_swing_state['auto_last_ticket'] = ticket
         self._log_trade(f"ORDER SENT [ICT Swing {signal.session}]: ticket={ticket} lots={trade.get('volume', 0.0)} entry={trade.get('price', signal.entry_price):.2f} sl={signal.stop_loss:.2f} tp={signal.take_profit_primary:.2f}")
@@ -2330,7 +2354,7 @@ class LiveDataStream:
                     **self._quote_audit_fields(
                         signal_id,
                         signal.entry_price,
-                        setup_id=f"ICT_SWING:{signal.session}:{signal.scenario}",
+                        setup_id=setup_id,
                         trade=trade,
                     ),
                 })
@@ -2354,6 +2378,19 @@ class LiveDataStream:
             self.campaign.record(self.symbol, signal.direction, swing_bucket)
 
     def _process_ict_atm_signal(self, signal: ICTATMSignal, spread_block: bool, atr_block: bool):
+        if not self.persistence:
+            return
+        metadata = signal.metadata or {}
+        setup_id = f"{self.config.get('broker', {}).get('login')}:ICT_ATM:{signal.direction}:{metadata.get('key_time')}:{metadata.get('break_time')}"
+        after = metadata.get('break_time')
+        level = metadata.get('structure_level')
+        tolerance = metadata.get('tolerance', 0.0)
+        if self.persistence.setup_was_traded(self.symbol, setup_id):
+            self._log_trade(f"SETUP BLOCKED [REPEAT]: {setup_id}")
+            return
+        if level is None or not confirmed_retest(self._get_nyupip_history(), signal.timestamp, level, signal.direction, tolerance, after):
+            self._log_trade(f"SETUP BLOCKED [WAITING_FOR_M1_REACTION]: {setup_id}")
+            return
         payload = signal.to_payload()
         signal_id = str(uuid4())
         self.ict_atm_state['last_signal'] = payload
@@ -2402,7 +2439,7 @@ class LiveDataStream:
                     **self._quote_audit_fields(
                         signal_id,
                         signal.entry_price,
-                        setup_id='ICT_ATM',
+                        setup_id=setup_id,
                     ),
                 })
             except Exception as exc:
@@ -2477,6 +2514,8 @@ class LiveDataStream:
         if not trade:
             return
 
+        signal.stop_loss = trade['sl']
+        signal.take_profit_primary = trade['tp']
         ticket = trade.get('ticket', 0)
         self.ict_atm_state['auto_last_ticket'] = ticket
         self._log_trade(f"ORDER SENT [ICT ATM]: ticket={ticket} lots={trade.get('volume', 0.0)} entry={trade.get('price', signal.entry_price):.2f} sl={signal.stop_loss:.2f} tp={signal.take_profit_primary:.2f}")
@@ -2500,7 +2539,7 @@ class LiveDataStream:
                     **self._quote_audit_fields(
                         signal_id,
                         signal.entry_price,
-                        setup_id='ICT_ATM',
+                        setup_id=setup_id,
                         trade=trade,
                     ),
                 })

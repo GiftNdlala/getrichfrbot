@@ -78,6 +78,8 @@ class OrderManager:
 		self.persistence = PersistenceManager()
 		self.autotrader = AutoTrader(symbol)
 		self.mt5 = MT5Connector() if MT5Connector else None
+		if self.mt5:
+			self.mt5.symbol = symbol
 		self.managed: Dict[int, ManagedOrder] = {}
 		# Per-symbol caps
 		cfg = get_config()
@@ -142,12 +144,22 @@ class OrderManager:
 		if equity > 0 and realized_today < 0:
 			loss_pct_today = abs(realized_today) / equity * 100.0
 		if loss_pct_today >= self.daily_loss_limit_pct:
-			print(f"⛔ Daily loss cap hit for {self.symbol}: {loss_pct_today:.2f}% ≥ {self.daily_loss_limit_pct:.2f}%. Halting new orders.")
+			print(f" Daily loss cap hit for {self.symbol}: {loss_pct_today:.2f}%  {self.daily_loss_limit_pct:.2f}%. Halting new orders.")
 			# Mark halt state on manager; LiveDataStream can choose to consult here if needed.
 			self.halt_new_orders = True
 		else:
 			self.halt_new_orders = False
 		positions = self.mt5.get_positions(self.symbol)
+		if positions is None:
+			print(f'RECONCILE DEFERRED: symbol={self.symbol} broker positions unavailable', flush=True)
+			return
+		# Adopt only this bot's broker positions; preserve broker open time.
+		for p in positions:
+			if p.ticket not in self.managed and getattr(p, 'magic', None) == 20250923:
+				rows = self.persistence.get_open_trades(self.symbol)
+				row = next((r for r in rows if r.get('ticket') == p.ticket), {})
+				level = row.get('alert_level') or 'RECOVERED'
+				self.managed[p.ticket] = ManagedOrder(p.ticket, datetime.utcfromtimestamp(p.time), p.price_open, p.sl, p.tp, 1 if p.type == 0 else -1, level, row.get('tier'))
 		open_tickets = {p.ticket for p in positions}
 		# Close detection for tickets we track but are not open anymore
 		for ticket, state in list(self.managed.items()):
@@ -168,6 +180,14 @@ class OrderManager:
 						deals = self.mt5.get_deals_for_position(ticket)
 					if not deals:
 						deals = self.mt5.get_orders_history(count=500)
+					# A persisted opening order ticket may differ from position_id.
+					opening = next((d for d in deals or [] if getattr(d, 'order', None) == ticket), None)
+					position_id = getattr(opening, 'position_id', None) or ticket
+					if position_id != ticket:
+						if position_id in open_tickets:
+							continue
+						if hasattr(self.mt5, 'get_deals_for_position'):
+							deals = self.mt5.get_deals_for_position(position_id)
 					
 					def _deal_ts(deal):
 						ts_msc = getattr(deal, 'time_msc', None)
@@ -182,7 +202,7 @@ class OrderManager:
 						pos = getattr(d, 'position', None)
 						if pos is None:
 							pos = getattr(d, 'position_id', None)
-						if pos is None or int(pos) != int(ticket):
+						if pos is None or int(pos) != int(position_id):
 							continue
 						position_deals.append(d)
 
@@ -191,6 +211,11 @@ class OrderManager:
 							closing_deals.append(d)
 					
 					if closing_deals:
+						opened_volume = sum(float(getattr(d, 'volume', 0) or 0) for d in position_deals if getattr(d, 'entry', None) == 0)
+						closed_volume = sum(float(getattr(d, 'volume', 0) or 0) for d in closing_deals)
+						if opened_volume > closed_volume + 1e-8:
+							self._log_trade(f'ORDER CLOSE UNCONFIRMED: ticket={ticket}; partial exit history, retaining tracking')
+							continue
 						closing_deal = max(closing_deals, key=_deal_ts)
 						exit_volume = sum(float(getattr(d, 'volume', 0.0) or 0.0) for d in closing_deals)
 						if exit_volume > 0:
@@ -205,19 +230,19 @@ class OrderManager:
 						close_deal_id = getattr(closing_deal, 'ticket', None)
 						commission = sum(float(getattr(d, 'commission', 0.0) or 0.0) for d in position_deals)
 						swap = sum(float(getattr(d, 'swap', 0.0) or 0.0) for d in position_deals)
-						pnl += commission + swap
+						pnl += commission + swap + sum(float(getattr(d, 'fee', 0.0) or 0.0) for d in position_deals)
 						close_reason = str(getattr(closing_deal, 'reason', '') or '')
 						try:
 							import datetime as _dt
 							ts = getattr(closing_deal, 'time', None)
 							if ts:
-								close_time_iso = _dt.datetime.fromtimestamp(ts).isoformat()
+								close_time_iso = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat()
 						except Exception as e:
-							print(f"⚠️ Error parsing close time for ticket {ticket}: {e}")
+							print(f" Error parsing close time for ticket {ticket}: {e}")
 					else:
-						print(f"⚠️ No closing deal found for ticket {ticket} in {len(deals or [])} deals")
+						print(f" No closing deal found for ticket {ticket} in {len(deals or [])} deals")
 				except Exception as e:
-					print(f"❌ Error fetching close data for ticket {ticket}: {e}")
+					print(f" Error fetching close data for ticket {ticket}: {e}")
 
 				if not closing_deals:
 					print(f"ORDER CLOSE UNCONFIRMED: ticket={ticket}; retaining tracking until broker close deal is available", flush=True)
@@ -226,7 +251,7 @@ class OrderManager:
 				payload = {'status': 'CLOSED'}
 				if close_price is not None and close_price > 0:
 					payload['close_price'] = close_price
-					print(f"✅ Saved close_price={close_price:.2f} for ticket {ticket}")
+					print(f" Saved close_price={close_price:.2f} for ticket {ticket}")
 				if close_time_iso is not None:
 					payload['close_time'] = close_time_iso
 				if pnl is not None:
@@ -235,6 +260,7 @@ class OrderManager:
 					payload['close_deal_id'] = close_deal_id
 				if commission is not None:
 					payload['commission'] = commission
+					payload['fee'] = sum(float(getattr(d, 'fee', 0.0) or 0.0) for d in position_deals)
 				if swap is not None:
 					payload['swap'] = swap
 				if close_reason:
@@ -247,6 +273,7 @@ class OrderManager:
 					self.persistence.update_trade(ticket, payload)
 				except Exception as e:
 					print(f"ORDER CLOSE PERSIST WARNING: ticket={ticket} error={e}", flush=True)
+					continue
 				self.managed.pop(ticket, None)
 		# Apply rules for open positions
 		for p in positions:
@@ -261,7 +288,9 @@ class OrderManager:
 			alert = (st.alert_level or 'LOW').upper()
 			exec_cfg = self.cfg.get('execution', {})
 			max_minutes_map = exec_cfg.get('max_position_minutes', { 'LOW': 10, 'MEDIUM': 10, 'HIGH': 20 })
-			max_age = timedelta(minutes=int(max_minutes_map.get(alert, 10)))
+			engine = 'FARMER' if st.tier == 'FARMER' else ('ICT_SWING' if alert.startswith('ICT_SWING') else alert)
+			minutes = max_minutes_map.get(engine)
+			max_age = timedelta(minutes=float(minutes)) if minutes is not None else None
 			age = datetime.utcnow() - st.open_time
 			# current price
 			price = pos.price_current
@@ -281,7 +310,7 @@ class OrderManager:
 				# nothing additional here; tiers were set as per trade creation
 				pass
 			# Time-based exit with loss minimizer
-			if age >= max_age:
+			if max_age is not None and age >= max_age:
 				if st.close_requested:
 					return
 				if not self._try_loss_minimizer(pos, st):
@@ -320,7 +349,7 @@ class OrderManager:
 			return False
 		# Close immediately if beyond max allowed loss
 		if abs(pnl) >= self.lm_max_loss:
-			print(f"⛔ Max loss cap reached ticket={st.ticket}: {pnl:.2f} >= {self.lm_max_loss:.2f}, closing now")
+			print(f" Max loss cap reached ticket={st.ticket}: {pnl:.2f} >= {self.lm_max_loss:.2f}, closing now")
 			return False
 		state = self._minimize_state.get(st.ticket)
 		now = datetime.utcnow()
@@ -333,16 +362,16 @@ class OrderManager:
 				'target': retrace_price,
 				'dir': st.direction
 			}
-			print(f"🕒 Loss minimizer armed ticket={st.ticket} target={retrace_price:.2f} window={self.lm_window_seconds}s")
+			print(f" Loss minimizer armed ticket={st.ticket} target={retrace_price:.2f} window={self.lm_window_seconds}s")
 			return True
 		# Window elapsed -> proceed to close
 		if (now - state['start']).total_seconds() >= self.lm_window_seconds:
-			print(f"⌛ Loss minimizer window elapsed ticket={st.ticket}, proceeding to close")
+			print(f" Loss minimizer window elapsed ticket={st.ticket}, proceeding to close")
 			self._minimize_state.pop(st.ticket, None)
 			return False
 		# Retrace achieved -> proceed to close with reduced loss
 		if (st.direction == 1 and pos.price_current >= state['target']) or (st.direction == -1 and pos.price_current <= state['target']):
-			print(f"✅ Loss minimizer hit target ticket={st.ticket} price={pos.price_current:.2f}, closing")
+			print(f" Loss minimizer hit target ticket={st.ticket} price={pos.price_current:.2f}, closing")
 			self._minimize_state.pop(st.ticket, None)
 			return False
 		# Still waiting
@@ -370,7 +399,7 @@ class OrderManager:
 		label = applicable_tier['label']
 		
 		if realized_loss_pct > 0:
-			print(f"🛡️ Progressive defense: {label} (realized loss {realized_loss_pct:.1f}%, size mult {mult:.0%})")
+			print(f" Progressive defense: {label} (realized loss {realized_loss_pct:.1f}%, size mult {mult:.0%})")
 		
 		return mult
 	

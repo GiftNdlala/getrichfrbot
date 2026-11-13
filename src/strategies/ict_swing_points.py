@@ -25,7 +25,7 @@ stop run / expansion has already been confirmed. Only XAUUSD is supported.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -78,23 +78,15 @@ class ICTSwingSignal:
 class ICTSwingPointsStrategy:
     """Implements ICT Swing Points session logic for XAUUSD."""
 
-    # Trading sessions - all sessions defined for reference
-    SESSIONS: Dict[str, Tuple[time, time]] = {
-        "ASIA": (time(0, 0), time(6, 59)),
-        "LONDON": (time(7, 0), time(11, 59)),
-        "NEW_YORK": (time(12, 0), time(15, 59)),
-        "LONDON_CLOSE": (time(15, 30), time(17, 30)),
+    # v2 research windows in America/New_York; no SAST constants or DST offsets.
+    SESSIONS = {
+        'ASIA': (time(19), time(23, 59)),
+        'LONDON': (time(2), time(4, 59)),
+        'NEW_YORK': (time(7), time(9, 59)),
+        'LONDON_CLOSE': (time(10), time(11, 59)),
     }
-    
-    # Active trading windows for HIGH signal profitability (SAST timezone)
-    # Based on backtest results: 12:00-14:00 and 15:30-17:30 show best performance
-    ACTIVE_TRADING_WINDOWS = [
-        (time(12, 0), time(14, 0)),   # London mid (13:00 profitable zone)
-        (time(15, 30), time(17, 30)),  # London close (15:30 & 17:00 pockets)
-    ]
-    
-    # NY Open window (14:00-15:30) requires extra confirmation for HIGH signals
-    NY_OPEN_CONFIRMATION_WINDOW = (time(14, 0), time(15, 30))
+    ACTIVE_TRADING_WINDOWS = [(time(2), time(5)), (time(7), time(8)), (time(9, 30), time(12))]
+    NY_OPEN_CONFIRMATION_WINDOW = (time(8), time(9, 30))
 
     def __init__(
         self,
@@ -104,7 +96,8 @@ class ICTSwingPointsStrategy:
         min_break_pct: float = 0.0015,
     ) -> None:
         self.symbol = symbol.upper()
-        self.timezone = pytz.timezone(timezone)
+        self.display_timezone = pytz.timezone(timezone)
+        self.timezone = pytz.timezone('America/New_York')
         self.ote_range = ote_range
         self.min_break_pct = min_break_pct
         self._last_diagnostics: Dict[str, Any] = {
@@ -118,7 +111,7 @@ class ICTSwingPointsStrategy:
         """Check if current time falls within high-probability trading windows (12:00-14:00 and 15:30-17:30 SAST)."""
         current_time = current_local.time()
         for start, end in self.ACTIVE_TRADING_WINDOWS:
-            if start <= current_time <= end:
+            if start <= current_time < end:
                 return True
         return False
     
@@ -126,7 +119,7 @@ class ICTSwingPointsStrategy:
         """Check if current time is in NY Open window (14:00-15:30) that requires extra confirmation."""
         current_time = current_local.time()
         start, end = self.NY_OPEN_CONFIRMATION_WINDOW
-        return start <= current_time <= end
+        return start <= current_time < end
 
     # ------------------------------------------------------------------
     # Public API
@@ -180,7 +173,9 @@ class ICTSwingPointsStrategy:
             current_ts = current_ts.tz_localize("UTC")
         current_local = current_ts.tz_convert(self.timezone)
 
-        today_slice = data[(data.index.date == current_local.date()) & (data.index <= current_local)]
+        trading_date = current_local.date() if current_local.hour < 19 else (current_local + pd.DateOffset(days=1)).date()
+        session_start = pd.Timestamp(self.timezone.localize(datetime.combine(trading_date - timedelta(days=1), time(19))))
+        today_slice = data[(data.index >= session_start) & (data.index + pd.Timedelta(minutes=1) <= current_local)]
         if today_slice.empty:
             diagnostics.update({"status": "skipped", "reason": "no_intraday_data"})
             self._last_diagnostics = diagnostics
@@ -204,8 +199,7 @@ class ICTSwingPointsStrategy:
         )
 
         # Apply time/session filters to HIGH level signals
-        # Only trade HIGH signals during active windows: 12:00-14:00 and 15:30-17:30 SAST
-        # NY Open (14:00-15:30) requires confidence >= 80 for HIGH signals
+        # Windows use the New York clock. OTE confidence alone never confirms NY open.
         filtered_signals: List[ICTSwingSignal] = []
         for sig in session_signals:
             # Check if this is a HIGH confidence signal (assumed by 0-100 scale in _build_signal)
@@ -218,12 +212,7 @@ class ICTSwingPointsStrategy:
                     filtered_signals.append(sig)
                     sig.notes += " [ACTIVE_WINDOW]" if "[" not in sig.notes else ""
                 elif self._is_ny_open_time(current_local):
-                    # NY Open window - only accept if confidence >= 80 (requires HTF confirmation)
-                    if sig.confidence >= 80.0:
-                        filtered_signals.append(sig)
-                        sig.notes += " [NY_OPEN_CONFIRMED]" if "[" not in sig.notes else ""
-                    else:
-                        sig.notes += " [NY_OPEN_BLOCKED_LOW_CONF]" if "[" not in sig.notes else ""
+                    sig.notes += " [NY_OPEN_REQUIRES_INDEPENDENT_CONFIRMATION]"
                 else:
                     # Outside trading windows - reject HIGH signals
                     sig.notes += " [OUTSIDE_TRADING_HOURS]" if "[" not in sig.notes else ""
@@ -317,7 +306,7 @@ class ICTSwingPointsStrategy:
         current_local: pd.Timestamp,
         current_quote: Dict[str, Any],
     ) -> List[ICTSwingSignal]:
-        if current_local.time() < time(6, 30) or current_local.time() > time(11, 59):
+        if not time(2) <= current_local.time() < time(5):
             return []
 
         asia = sessions.get("ASIA")
@@ -346,7 +335,7 @@ class ICTSwingPointsStrategy:
                 break_amt = impulse_high - asia_high
                 if break_amt >= max(self.min_break_pct * current_price, 1.0):
                     ote_high = impulse_high
-                    ote_ratio = (current_price - asia_low) / max(ote_high - asia_low, 1e-6)
+                    ote_ratio = (ote_high - current_price) / max(ote_high - asia_low, 1e-6)
                     if self.ote_range[0] <= ote_ratio <= self.ote_range[1]:
                         signals.append(
                             self._build_signal(
@@ -373,7 +362,7 @@ class ICTSwingPointsStrategy:
                 break_amt = asia_low - impulse_low
                 if break_amt >= max(self.min_break_pct * current_price, 1.0):
                     ote_low = impulse_low
-                    ote_ratio = (asia_high - current_price) / max(asia_high - ote_low, 1e-6)
+                    ote_ratio = (current_price - ote_low) / max(asia_high - ote_low, 1e-6)
                     if self.ote_range[0] <= ote_ratio <= self.ote_range[1]:
                         signals.append(
                             self._build_signal(
@@ -400,7 +389,7 @@ class ICTSwingPointsStrategy:
         current_local: pd.Timestamp,
         current_quote: Dict[str, Any],
     ) -> List[ICTSwingSignal]:
-        if current_local.time() < time(11, 30) or current_local.time() > time(15, 30):
+        if not time(7) <= current_local.time() < time(10):
             return []
 
         london = sessions.get("LONDON")
@@ -427,7 +416,7 @@ class ICTSwingPointsStrategy:
             else:
                 break_amt = impulse_high - london_low
             if break_amt >= max(self.min_break_pct * current_price, 1.0):
-                ote_ratio = (current_price - london_low) / max(impulse_high - london_low, 1e-6)
+                ote_ratio = (impulse_high - current_price) / max(impulse_high - london_low, 1e-6)
                 if self.ote_range[0] <= ote_ratio <= self.ote_range[1]:
                     signals.append(
                         self._build_signal(
@@ -453,7 +442,7 @@ class ICTSwingPointsStrategy:
             else:
                 break_amt = london_high - impulse_low
             if break_amt >= max(self.min_break_pct * current_price, 1.0):
-                ote_ratio = (london_high - current_price) / max(london_high - impulse_low, 1e-6)
+                ote_ratio = (current_price - impulse_low) / max(london_high - impulse_low, 1e-6)
                 if self.ote_range[0] <= ote_ratio <= self.ote_range[1]:
                     signals.append(
                         self._build_signal(
@@ -480,7 +469,7 @@ class ICTSwingPointsStrategy:
         current_local: pd.Timestamp,
         current_quote: Dict[str, Any],
     ) -> List[ICTSwingSignal]:
-        if current_local.time() < time(15, 15) or current_local.time() > time(18, 0):
+        if not time(10) <= current_local.time() < time(12):
             return []
 
         london_close = sessions.get("LONDON_CLOSE")

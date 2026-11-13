@@ -97,3 +97,18 @@ clients. The devices accessing the dashboard must have Tailscale installed
 and be signed into your tailnet. `/api/recent_trades` returns the detailed
 trade rows, and `/api/trades/<ticket>/events` returns that order's lifecycle
 audit events.
+
+
+## Research changes dated 27 October 2026
+
+Read [the change log](../../docs/research/2026-10-27-change-log.md) before updating the VM. These changes have not been forward-tested against its MT5 terminal. Keep trading disarmed for the initial smoke test and preserve the current working revision for rollback. Defaults now require a demo account, fresh broker data, working audit storage, available position/history reads, and a current verified `data/news_calendar.json`. Missing/expired calendar coverage intentionally blocks entries, not monitoring or existing-position management. Do not interpret a blocked order as proof of a broken strategy.
+
+Use the VM's existing bot interpreter for a consistent database snapshot:
+
+```powershell
+python analysis/backup_database.py
+```
+
+The command uses SQLite's backup API and includes committed WAL changes while the database is live. Copy the resulting `data/backups/trades-TIMESTAMP.sqlite` off the VM and export matching MT5 deals, process logs, deployed Git revision, symbol specifications, and effective non-secret settings. Do not send `.env` or credentials. The copied virtual environment in Git is not a portable installation; install requirements in an environment owned by the VM.
+
+Startup fix: automatic calendar refresh and strategy routing diagnostics are documented in [28 October startup fixes](../../docs/research/2026-10-28-startup-fix.md). Restart the dashboard to load these changes.

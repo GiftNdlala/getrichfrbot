@@ -1,11 +1,22 @@
 import os
 import sqlite3
+from contextlib import contextmanager
 import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from uuid import uuid4
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'trades.sqlite')
+
+
+@contextmanager
+def connect_db(path):
+    conn = sqlite3.connect(path, timeout=15.0)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 class PersistenceManager:
@@ -17,7 +28,7 @@ class PersistenceManager:
 	def _ensure_db(self):
 		dirname = os.path.dirname(self.db_path)
 		os.makedirs(dirname, exist_ok=True)
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			conn.execute("PRAGMA journal_mode=WAL")
 			conn.execute("PRAGMA busy_timeout=15000")
 			conn.execute(
@@ -109,7 +120,7 @@ class PersistenceManager:
 
 	def _migrate_db(self):
 		"""Add new lifecycle columns if missing"""
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			# ---- trades table migrations ----
 			existing_cols = {}
 			for row in conn.execute("PRAGMA table_info(trades)").fetchall():
@@ -140,6 +151,7 @@ class PersistenceManager:
 				'open_deal_id': 'INTEGER',
 				'close_deal_id': 'INTEGER',
 				'commission': 'REAL',
+				'fee': 'REAL',
 				'swap': 'REAL',
 				'updated_at': 'TEXT'
 			}
@@ -174,7 +186,7 @@ class PersistenceManager:
 
 	def save_signal(self, data: Dict[str, Any]) -> str:
 		# Accept dict-like LiveSignal
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			columns = [
 				'timestamp','symbol','current_price','signal','signal_type','confidence','rsi','macd','macd_signal',
 				'sma_20','sma_50','price_change','price_change_pct','alert_level','alert_color','target_pips','success_rate',
@@ -192,7 +204,7 @@ class PersistenceManager:
 			return signal_id
 
 	def save_trade(self, trade: Dict[str, Any]) -> None:
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			# Insert with dynamic columns (only ones present in table)
 			conn.row_factory = sqlite3.Row
 			table_cols = [r['name'] for r in conn.execute("PRAGMA table_info(trades)").fetchall()]
@@ -225,7 +237,7 @@ class PersistenceManager:
 	def update_trade(self, ticket: int, fields: Dict[str, Any]) -> None:
 		if not fields:
 			return
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			fields['updated_at'] = datetime.now(timezone.utc).isoformat()
 			set_clause = ', '.join([f"{k} = ?" for k in fields.keys()])
 			values = list(fields.values()) + [ticket]
@@ -239,7 +251,7 @@ class PersistenceManager:
 			conn.commit()
 
 	def get_open_trades(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			conn.row_factory = sqlite3.Row
 			if symbol:
 				rows = conn.execute("SELECT * FROM trades WHERE status IN ('SENT','OPEN') AND symbol = ?", (symbol,)).fetchall()
@@ -247,8 +259,12 @@ class PersistenceManager:
 				rows = conn.execute("SELECT * FROM trades WHERE status IN ('SENT','OPEN')").fetchall()
 			return [dict(r) for r in rows]
 
+	def setup_was_traded(self, symbol: str, setup_id: str) -> bool:
+		with connect_db(self.db_path) as conn:
+			return conn.execute('SELECT 1 FROM trades WHERE symbol = ? AND setup_id = ? LIMIT 1', (symbol, setup_id)).fetchone() is not None
+
 	def get_trade_events(self, ticket: int) -> List[Dict[str, Any]]:
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			conn.row_factory = sqlite3.Row
 			rows = conn.execute(
 				"SELECT id, ticket, event_type, timestamp, details_json FROM trade_events WHERE ticket = ? ORDER BY id",
@@ -261,29 +277,26 @@ class PersistenceManager:
 				events.append(event)
 			return events
 
-	def recent_trades(self, hours: int = 20, limit: int = 200) -> List[Dict[str, Any]]:
-		"""Return trades within the last N hours (open or closed)."""
-		cutoff = (datetime.utcnow() - datetime.timedelta(hours=hours)) if hasattr(datetime, 'timedelta') else None
-		# Build cutoff string; if datetime.timedelta not available for some reason, default to 20h ago
-		from datetime import datetime as _dt, timedelta as _td
-		cutoff_dt = _dt.utcnow() - _td(hours=hours)
-		cutoff_str = cutoff_dt.strftime('%Y-%m-%d %H:%M:%S')
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+	def recent_trades(self, hours: int = 20, limit: int = 200, now=None) -> List[Dict[str, Any]]:
+		"""Compare actual instants, including legacy space/T formats and offsets."""
+		from datetime import timedelta
+		cutoff = ((now or datetime.now(timezone.utc)) - timedelta(hours=hours)).isoformat()
+		with connect_db(self.db_path) as conn:
 			conn.row_factory = sqlite3.Row
 			rows = conn.execute(
-				"SELECT * FROM trades WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
-				(cutoff_str, limit)
+				"SELECT * FROM trades WHERE julianday(timestamp) >= julianday(?) ORDER BY julianday(timestamp) DESC LIMIT ?",
+				(cutoff, limit),
 			).fetchall()
 			return [dict(r) for r in rows]
 
 	def latest_signal(self) -> Optional[Dict[str, Any]]:
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			conn.row_factory = sqlite3.Row
 			row = conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 1").fetchone()
 			return dict(row) if row else None
 
 	def recent_signals(self, limit: int = 10) -> List[Dict[str, Any]]:
-		with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+		with connect_db(self.db_path) as conn:
 			conn.row_factory = sqlite3.Row
 			rows = conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 			return [dict(r) for r in rows]

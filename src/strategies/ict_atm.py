@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import pytz
+from ..market_data import closed_bars
 
 
 @dataclass
@@ -124,7 +125,7 @@ class ICTATMStrategy:
             self._last_diagnostics = diagnostics
             return signals, diagnostics
 
-        h1 = self._prepare_h1_bars(historical_data[base_cols])
+        h1 = closed_bars(historical_data[base_cols], "1h", current_quote.get("timestamp", datetime.utcnow())).tail(240)
         if h1.empty or len(h1) < 60:
             diagnostics.update({"status": "skipped", "reason": "insufficient_h1_bars"})
             self._last_diagnostics = diagnostics
@@ -273,7 +274,7 @@ class ICTATMStrategy:
             post = h1.iloc[idx2 + 1 :]
             if post.empty:
                 continue
-            breaks = post[post["Low"] < structure_low]
+            breaks = post[post["Close"] < structure_low]
             if breaks.empty:
                 continue  # structure has not broken yet
             break_time = breaks.index[0]
@@ -338,7 +339,7 @@ class ICTATMStrategy:
             post = h1.iloc[idx2 + 1 :]
             if post.empty:
                 continue
-            breaks = post[post["High"] > structure_high]
+            breaks = post[post["Close"] > structure_high]
             if breaks.empty:
                 continue
             break_time = breaks.index[0]
@@ -427,6 +428,8 @@ class ICTATMStrategy:
         confidence = max(0.0, min(100.0, confidence))
 
         metadata = {
+            "key_time": str(_.get("key_time", "")),
+            "break_time": (pd.Timestamp(_["break_time"]) + pd.Timedelta(hours=1)).isoformat(),
             "structure_level": round(float(structure_level), 3),
             "key_level": round(float(key_level), 3),
             "target_level": round(float(primary_target), 3),

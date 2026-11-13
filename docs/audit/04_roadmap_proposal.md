@@ -1,5 +1,7 @@
 # Roadmap proposal
 
+Status update, 27 October 2026: implementation has advanced beyond this original proposal. See [the versioned change log](../research/2026-10-27-change-log.md) and [validation results](../research/validation-2026-10-27.md) for current status. Original proposals below remain a historical research plan.
+
 This is a documentation-only roadmap based on the audited code path and the observed risk patterns.
 
 ## Phase 0 — stop the bleeding

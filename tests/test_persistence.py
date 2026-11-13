@@ -2,18 +2,25 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from src.persistence import PersistenceManager
+from src.persistence import PersistenceManager, connect_db
 from src.order_manager import ManagedOrder, OrderManager
 
 
 class PersistenceManagerTests(unittest.TestCase):
+	def test_recent_trades_compares_offsets_and_mixed_timestamp_formats(self):
+		with tempfile.TemporaryDirectory() as temp_dir:
+			store = PersistenceManager(os.path.join(temp_dir, 'trades.sqlite'))
+			for ticket, timestamp in [(1,'2026-10-27T08:00:00Z'),(2,'2026-10-27 09:30:00'),(3,'2026-10-27T09:30:00+02:00')]:
+				store.save_trade({'timestamp':timestamp,'symbol':'XAUUSDm','ticket':ticket,'status':'OPEN'})
+			rows=store.recent_trades(hours=1,now=datetime(2026,10,27,10,tzinfo=timezone.utc))
+			self.assertEqual([r['ticket'] for r in rows],[2])
 	def test_migrates_existing_database_and_records_trade_history(self):
 		with tempfile.TemporaryDirectory() as temp_dir:
 			db_path = os.path.join(temp_dir, "trades.sqlite")
-			with sqlite3.connect(db_path) as conn:
+			with connect_db(db_path) as conn:
 				conn.execute(
 					"""
 					CREATE TABLE trades (
@@ -122,7 +129,7 @@ class PersistenceManagerTests(unittest.TestCase):
 			})
 			store.update_trade(457, {"status": "CLOSED", "pnl": 2.0})
 
-			with sqlite3.connect(db_path) as conn:
+			with connect_db(db_path) as conn:
 				conn.row_factory = sqlite3.Row
 				trade = dict(conn.execute(
 					"SELECT * FROM trades WHERE ticket = ?", (456,)

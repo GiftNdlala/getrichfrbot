@@ -1,0 +1,9 @@
+# Shared risk and tracking — 28 October 2026
+
+Allow up to four account positions, retaining the 0.5% equity combined stop-risk cap and 2% daily loss limit. Reserve one slot and 0.1% equity of capacity for Farmer when it has no active or acknowledged position. Other strategies can use the remaining 0.4%; Farmer risk remains limited by its own percentage/cash caps. Orders may size down or wait when minimum volume exceeds remaining risk. Four positions is a ceiling, not a promise of four fills. All account positions consume the budget, including manual positions and other symbols. Symbol risk is computed separately from account risk. Unprotected positions and pending broker orders continue to block entries.
+
+Tracking now resolves an opening order to its broker position_id using the recorded opening deal and broker history. Visible positions consume risk once; an acknowledged fill remains reserved until visible or full exit volume is confirmed. Missing history and partial exits cannot release a slot merely with elapsed time. Order-manager close reconciliation also resolves differing order/position IDs and retains partial exit history for retry. The original log showed a legitimate one-position cap; it did not itself prove a stale slot. These changes address the identifier mismatch failure path.
+
+Independent same-symbol strategies require a hedging account. On netting accounts, same-symbol additions are explicitly blocked to avoid merging positions with conflicting stops/targets. No broker account settings are changed.
+
+Restart the dashboard to apply. No live orders were sent and no running process was restarted during implementation. Automated simulated checks cover combined budgets, reserved Farmer capacity, other-symbol exposure, identifier mismatch/full exit release, visible-position deduplication, partial exits, and netting protection. Live broker verification remains required.

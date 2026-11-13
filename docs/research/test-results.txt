@@ -1,0 +1,110 @@
+test_live_wal_is_included_without_changing_source (test_backup_database.BackupTests.test_live_wal_is_included_without_changing_source) ... ok
+test_acknowledged_order_reserves_slot_before_position_visibility (test_execution_safety.ExecutionSafetyTests.test_acknowledged_order_reserves_slot_before_position_visibility) ... ORDER OPEN SENT [DONE]: ticket=123 symbol=XAUUSDm volume=0.02 open_price=100.02 sl=99.0 tp=103.0 strategy=TEST
+ORDER BLOCKED: symbol=XAUUSDm strategy=OTHER_ENGINE reason=POSITION_CAP
+ok
+test_broker_stop_constraints_do_not_silently_widen_risk (test_execution_safety.ExecutionSafetyTests.test_broker_stop_constraints_do_not_silently_widen_risk) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=INVALID_BROKER_LEVELS:STOP_TOO_CLOSE
+ok
+test_commission_is_in_daily_loss (test_execution_safety.ExecutionSafetyTests.test_commission_is_in_daily_loss) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=DAILY_LOSS_CAP
+ok
+test_daily_history_read_failure_blocks (test_execution_safety.ExecutionSafetyTests.test_daily_history_read_failure_blocks) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=DAILY_HISTORY_UNAVAILABLE
+ok
+test_defense_tier_reduces_size (test_execution_safety.ExecutionSafetyTests.test_defense_tier_reduces_size) ... ORDER OPEN SENT [DONE]: ticket=123 symbol=XAUUSDm volume=0.01 open_price=100.02 sl=99.0 tp=103.0 strategy=TEST
+ok
+test_existing_other_engine_or_manual_position_blocks (test_execution_safety.ExecutionSafetyTests.test_existing_other_engine_or_manual_position_blocks) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=POSITION_CAP
+ok
+test_failed_signal_persistence_blocks_order (test_execution_safety.ExecutionSafetyTests.test_failed_signal_persistence_blocks_order) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=AUDIT_STORAGE_REQUIRED
+ok
+test_farmer_daily_loss_includes_previous_day_entry (test_execution_safety.ExecutionSafetyTests.test_farmer_daily_loss_includes_previous_day_entry) ... ORDER BLOCKED: symbol=XAUUSDm strategy=FARMER reason=FARMER_DAILY_LOSS_CAP
+ok
+test_farmer_requires_dollar_account (test_execution_safety.ExecutionSafetyTests.test_farmer_requires_dollar_account) ... ORDER BLOCKED: symbol=XAUUSDm strategy=FARMER reason=FARMER_USD_ACCOUNT_REQUIRED
+ok
+test_farmer_target_is_account_dollars_after_sizing (test_execution_safety.ExecutionSafetyTests.test_farmer_target_is_account_dollars_after_sizing) ... ORDER OPEN SENT [DONE]: ticket=123 symbol=XAUUSDm volume=0.01 open_price=100.02 sl=99.2 tp=102.17 strategy=FARMER
+ok
+test_final_quote_movement_rechecks_risk_and_entry (test_execution_safety.ExecutionSafetyTests.test_final_quote_movement_rechecks_risk_and_entry) ... ORDER OPEN SENT [DONE]: ticket=123 symbol=XAUUSDm volume=0.02 open_price=100.03 sl=99.0 tp=103.0 strategy=TEST
+ok
+test_first_day_demo_deposit_is_not_trading_profit (test_execution_safety.ExecutionSafetyTests.test_first_day_demo_deposit_is_not_trading_profit) ... ORDER OPEN SENT [DONE]: ticket=123 symbol=XAUUSDm volume=0.02 open_price=100.02 sl=99.0 tp=103.0 strategy=TEST
+ok
+test_floating_daily_loss_blocks (test_execution_safety.ExecutionSafetyTests.test_floating_daily_loss_blocks) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=DAILY_LOSS_CAP
+ok
+test_large_final_quote_drift_does_not_submit (test_execution_safety.ExecutionSafetyTests.test_large_final_quote_drift_does_not_submit) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=QUOTE_MOVED_DURING_CHECKS
+ok
+test_minimum_lot_is_rejected_instead_of_rounded_up (test_execution_safety.ExecutionSafetyTests.test_minimum_lot_is_rejected_instead_of_rounded_up) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=MINIMUM_LOT_EXCEEDS_RISK
+ok
+test_missing_history_blocks_order (test_execution_safety.ExecutionSafetyTests.test_missing_history_blocks_order) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=BROKER_DATA_REQUIRED
+ok
+test_no_additional_risk_with_unprotected_existing_position (test_execution_safety.ExecutionSafetyTests.test_no_additional_risk_with_unprotected_existing_position) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=UNPROTECTED_POSITION
+ok
+test_no_unknown_news_coverage (test_execution_safety.ExecutionSafetyTests.test_no_unknown_news_coverage) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=NEWS_CALENDAR_UNAVAILABLE
+ok
+test_nonfinite_order_blocked (test_execution_safety.ExecutionSafetyTests.test_nonfinite_order_blocked) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=INVALID_ORDER_LEVELS
+ok
+test_pending_order_reserves_capacity (test_execution_safety.ExecutionSafetyTests.test_pending_order_reserves_capacity) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=POSITION_CAP:PENDING_ORDER
+ok
+test_pending_orders_read_failure_blocks (test_execution_safety.ExecutionSafetyTests.test_pending_orders_read_failure_blocks) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=EXPOSURE_UNAVAILABLE
+ok
+test_positions_read_failure_blocks (test_execution_safety.ExecutionSafetyTests.test_positions_read_failure_blocks) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=EXPOSURE_UNAVAILABLE
+ok
+test_real_account_blocked (test_execution_safety.ExecutionSafetyTests.test_real_account_blocked) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=DEMO_ACCOUNT_REQUIRED
+ok
+test_relative_spread_spike_blocks_order (test_execution_safety.ExecutionSafetyTests.test_relative_spread_spike_blocks_order) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=SPREAD_SPIKE
+ok
+test_sell_risk_and_target_sides (test_execution_safety.ExecutionSafetyTests.test_sell_risk_and_target_sides) ... ORDER OPEN SENT [DONE]: ticket=123 symbol=XAUUSDm volume=0.02 open_price=100.0 sl=101.0 tp=97.0 strategy=TEST
+ok
+test_session_gate_applies_to_event_orders_too (test_execution_safety.ExecutionSafetyTests.test_session_gate_applies_to_event_orders_too) ... ORDER BLOCKED: symbol=XAUUSDm strategy=EVENT reason=OUTSIDE_SESSION
+ok
+test_sizes_at_actual_market_entry (test_execution_safety.ExecutionSafetyTests.test_sizes_at_actual_market_entry) ... ORDER OPEN SENT [DONE]: ticket=123 symbol=XAUUSDm volume=0.02 open_price=100.02 sl=99.0 tp=103.0 strategy=TEST
+ok
+test_spread_is_rechecked_at_submission (test_execution_safety.ExecutionSafetyTests.test_spread_is_rechecked_at_submission) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=SPREAD_CAP
+ok
+test_stale_broker_tick_blocked (test_execution_safety.ExecutionSafetyTests.test_stale_broker_tick_blocked) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=QUOTE_STALE
+ok
+test_stale_signal_quote_blocked (test_execution_safety.ExecutionSafetyTests.test_stale_signal_quote_blocked) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=QUOTE_STALE
+ok
+test_synthetic_source_blocked (test_execution_safety.ExecutionSafetyTests.test_synthetic_source_blocked) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=BROKER_DATA_REQUIRED
+ok
+test_unknown_account_balance_is_rejected (test_execution_safety.ExecutionSafetyTests.test_unknown_account_balance_is_rejected) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=DAILY_BASELINE_INVALID
+ok
+test_volume_floor_does_not_round_up (test_execution_safety.ExecutionSafetyTests.test_volume_floor_does_not_round_up) ... ok
+test_wrong_account_blocked (test_execution_safety.ExecutionSafetyTests.test_wrong_account_blocked) ... ORDER BLOCKED: symbol=XAUUSDm strategy=TEST reason=ACCOUNT_MISMATCH
+ok
+test_dashboard_risk_scenario_uses_actual_equity_and_configured_budget (test_farmer_integration.FarmerIntegrationTests.test_dashboard_risk_scenario_uses_actual_equity_and_configured_budget) ... ok
+test_farmer_can_trade_with_high_engine_disabled_and_no_ensemble_signal (test_farmer_integration.FarmerIntegrationTests.test_farmer_can_trade_with_high_engine_disabled_and_no_ensemble_signal) ... ok
+test_refresh_replaces_quote_candles_with_completed_broker_bars (test_farmer_integration.FarmerIntegrationTests.test_refresh_replaces_quote_candles_with_completed_broker_bars) ... ok
+test_trade_gate_continue_still_reconciles_and_waits (test_farmer_integration.FarmerIntegrationTests.test_trade_gate_continue_still_reconciles_and_waits) ... ok
+test_complete_boundary_bar_retained (test_market_data.MarketDataTests.test_complete_boundary_bar_retained) ... ok
+test_farmer_accepts_completed_trend_pullback_confirmation (test_market_data.MarketDataTests.test_farmer_accepts_completed_trend_pullback_confirmation) ... ok
+test_farmer_checks_a_bar_once (test_market_data.MarketDataTests.test_farmer_checks_a_bar_once) ... ok
+test_farmer_does_not_force_trades_in_flat_market (test_market_data.MarketDataTests.test_farmer_does_not_force_trades_in_flat_market) ... ok
+test_forming_h1_and_future_input_excluded (test_market_data.MarketDataTests.test_forming_h1_and_future_input_excluded) ... ok
+test_incomplete_higher_timeframe_bar_rejected (test_market_data.MarketDataTests.test_incomplete_higher_timeframe_bar_rejected) ... ok
+test_only_completed_m1_in_history (test_market_data.MarketDataTests.test_only_completed_m1_in_history) ... ok
+test_repeated_snapshot_replaces_not_duplicates (test_market_data.MarketDataTests.test_repeated_snapshot_replaces_not_duplicates) ... ok
+test_stale_history_raises (test_market_data.MarketDataTests.test_stale_history_raises) ... ok
+test_valid_coverage_and_blackout_boundaries (test_news_readiness.NewsReadinessTests.test_valid_coverage_and_blackout_boundaries) ... ok
+test_no_history_is_not_perfect_performance (test_performance_report.PerformanceTests.test_no_history_is_not_perfect_performance) ... ok
+test_sixty_percent_wins_can_still_lose_money (test_performance_report.PerformanceTests.test_sixty_percent_wins_can_still_lose_money) ... ok
+test_unknown_results_are_not_wins (test_performance_report.PerformanceTests.test_unknown_results_are_not_wins) ... ok
+test_migrates_existing_database_and_records_trade_history (test_persistence.PersistenceManagerTests.test_migrates_existing_database_and_records_trade_history) ... ok
+test_recent_trades_compares_offsets_and_mixed_timestamp_formats (test_persistence.PersistenceManagerTests.test_recent_trades_compares_offsets_and_mixed_timestamp_formats) ... ok
+test_reconcile_persists_confirmed_exit_fill_and_net_pnl (test_persistence.PersistenceManagerTests.test_reconcile_persists_confirmed_exit_fill_and_net_pnl) ...  Saved close_price=101.67 for ticket 456
+ok
+test_reconcile_waits_for_broker_close_deal (test_persistence.PersistenceManagerTests.test_reconcile_waits_for_broker_close_deal) ...  No closing deal found for ticket 123 in 0 deals
+ORDER CLOSE UNCONFIRMED: ticket=123; retaining tracking until broker close deal is available
+ok
+test_asia_range_comes_from_previous_new_york_evening (test_strategy_correctness.StrategyCorrectnessTests.test_asia_range_comes_from_previous_new_york_evening) ... ok
+test_atm_uses_explicit_holding_period (test_strategy_correctness.StrategyCorrectnessTests.test_atm_uses_explicit_holding_period) ... ok
+test_broker_read_failure_cannot_close_tracking (test_strategy_correctness.StrategyCorrectnessTests.test_broker_read_failure_cannot_close_tracking) ... RECONCILE DEFERRED: symbol=XAUUSDm broker positions unavailable
+ok
+test_bullish_ote_accepts_deep_pullback_not_shallow_progress (test_strategy_correctness.StrategyCorrectnessTests.test_bullish_ote_accepts_deep_pullback_not_shallow_progress) ... ok
+test_failed_time_exit_retains_tracking_and_retries (test_strategy_correctness.StrategyCorrectnessTests.test_failed_time_exit_retains_tracking_and_retries) ... ORDER CLOSING [TIME]: ticket=1 age_minutes=11.0
+ORDER CLOSING [TIME]: ticket=1 age_minutes=11.0
+ok
+test_mere_retest_touch_does_not_confirm_entry (test_strategy_correctness.StrategyCorrectnessTests.test_mere_retest_touch_does_not_confirm_entry) ... ok
+test_new_york_session_clock_tracks_both_dst_transitions (test_strategy_correctness.StrategyCorrectnessTests.test_new_york_session_clock_tracks_both_dst_transitions) ... ok
+test_nyupip_utc_context_keeps_last_completed_boundary (test_strategy_correctness.StrategyCorrectnessTests.test_nyupip_utc_context_keeps_last_completed_boundary) ... ok
+test_restart_adopts_bot_position_with_original_open_time (test_strategy_correctness.StrategyCorrectnessTests.test_restart_adopts_bot_position_with_original_open_time) ... ok
+
+----------------------------------------------------------------------
+Ran 65 tests in 1.813s
+
+OK

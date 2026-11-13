@@ -126,7 +126,7 @@ class MT5Connector:
 			return {
 				'price': price,
 				'prev_close': prev_close,
-				'timestamp': dt.datetime.fromtimestamp(tick.time or dt.datetime.now().timestamp()),
+				'timestamp': dt.datetime.fromtimestamp(tick.time, dt.timezone.utc),
 				'volume': float(tick.volume) if hasattr(tick, 'volume') and tick.volume else 0.0,
 				'spread_points': spread,
 				'bid': bid,
@@ -139,14 +139,16 @@ class MT5Connector:
 	@mt5_synchronized
 	def get_positions(self, symbol_filter: Optional[str] = None):
 		if not self._ensure_initialized():
-			return []
+			return None
 		try:
 			positions = mt5.positions_get()
+			if positions is None:
+				return None
 			if symbol_filter:
 				positions = [p for p in (positions or []) if p.symbol == symbol_filter]
 			return positions or []
 		except Exception:
-			return []
+			return None
 
 	@mt5_synchronized
 	def get_orders_history(self, count: int = 50):

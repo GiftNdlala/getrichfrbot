@@ -12,6 +12,7 @@ import pytz
 
 from ..indicators import TechnicalIndicators
 from ..microstructure import ChopDetector
+from ..market_data import closed_bars, utc_timestamp
 
 
 @dataclass
@@ -173,20 +174,14 @@ class NYUPIPStrategy:
                 return float(value) if isinstance(value, (int, float)) else value
             except Exception:
                 return None
-        try:
-            data.index = pd.DatetimeIndex(data.index).tz_localize(None)
-        except (AttributeError, TypeError):
-            data.index = pd.to_datetime(data.index)
-
-        current_ts_raw = pd.Timestamp(current_quote.get("timestamp", datetime.utcnow()))
-        if current_ts_raw.tzinfo is None:
-            current_ts_raw = current_ts_raw.tz_localize("UTC")
+        data.index = pd.to_datetime(data.index, utc=True)
+        current_ts_raw = utc_timestamp(current_quote.get("timestamp", datetime.utcnow()))
         current_ts_sast = current_ts_raw.tz_convert(self.timezone)
-        current_ts = current_ts_sast.tz_localize(None)
+        current_ts = current_ts_raw
         within_active_hours = self._is_within_active_window(current_ts_sast.to_pydatetime())
 
-        h1 = self._resample_ohlc(data, "1h")
-        m15 = self._resample_ohlc(data, "15min")
+        h1 = closed_bars(data, "1h", current_ts_raw)
+        m15 = closed_bars(data, "15min", current_ts_raw)
 
         self._context_snapshot.update({
             "h1_bars": int(len(h1)) if h1 is not None else 0,
@@ -236,10 +231,7 @@ class NYUPIPStrategy:
         if not np.isnan(atr_current) and not np.isnan(atr_avg) and atr_avg > 0:
             atr_valid = atr_current >= atr_avg * self.atr_multiplier
 
-        m15_closed = m15[m15.index <= current_ts.floor("15min")]
-        if len(m15_closed) >= 2 and m15_closed.index[-1] == current_ts.floor("15min"):
-            # Remove potentially forming bar
-            m15_closed = m15_closed.iloc[:-1]
+        m15_closed = m15
 
         m15_sast = self._convert_to_timezone(m15, self.timezone)
 
@@ -514,13 +506,13 @@ class NYUPIPStrategy:
             diag["reason"] = "atr_filter_failed"
             return signals, diag
 
-        now_sast: datetime = ctx["timestamp_tz"]  # type: ignore[assignment]
+        now_sast: datetime = ctx["timestamp"].tz_convert("America/New_York").to_pydatetime()  # type: ignore[assignment]
         diag["timestamp"] = now_sast.isoformat()
-        if now_sast.time() < time(15, 10) or now_sast.time() > time(15, 30):
+        if now_sast.time() < time(8, 30) or now_sast.time() >= time(8, 45):
             diag["reason"] = "outside_trade_window"
             return signals, diag
 
-        m15_sast: pd.DataFrame = ctx["m15_sast"]  # type: ignore[assignment]
+        m15_sast: pd.DataFrame = ctx["m15"].tz_convert("America/New_York")  # type: ignore[assignment]
         if m15_sast is None or m15_sast.empty:
             diag["reason"] = "no_intraday_data"
             return signals, diag
@@ -531,8 +523,8 @@ class NYUPIPStrategy:
             diag["reason"] = "no_today_data"
             return signals, diag
 
-        c1445 = self._find_candle(today_data, time(14, 45))
-        c1515 = self._find_candle(today_data, time(15, 15))
+        c1445 = self._find_candle(today_data, time(7, 45))
+        c1515 = self._find_candle(today_data, time(8, 15))
         if c1445 is None or c1515 is None:
             diag["reason"] = "required_candles_missing"
             return signals, diag
@@ -546,7 +538,7 @@ class NYUPIPStrategy:
             diag["reason"] = "bias_candle_mismatch"
             return signals, diag
 
-        entry_price = float(c1515["Close"])
+        entry_price = float(ctx["current_price"])
         stop_loss = float(c1445["Open"])
 
         if direction == 1 and stop_loss >= entry_price:
@@ -564,14 +556,14 @@ class NYUPIPStrategy:
             })
             return signals, diag
 
-        previous_day = now_sast.date() - timedelta(days=1)
-        prev_mask = m15_sast.index.date == previous_day
-        prev_day_data = m15_sast.loc[prev_mask]
+        prior_dates = sorted({d for d in m15_sast.index.date if d < now_sast.date() and d.weekday() < 5})
+        previous_day = prior_dates[-1] if prior_dates else None
+        prev_day_data = m15_sast.loc[m15_sast.index.date == previous_day]
         if prev_day_data.empty:
             diag["reason"] = "no_previous_day_data"
             return signals, diag
 
-        ny_session = prev_day_data.between_time("13:00", "21:00")
+        ny_session = prev_day_data.between_time("08:00", "16:00", inclusive="left")
         if ny_session.empty:
             diag["reason"] = "ny_session_missing"
             return signals, diag

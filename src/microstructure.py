@@ -11,6 +11,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import Dict, Tuple, Optional
 import numpy as np
+import time as clock_time
 import pandas as pd
 
 
@@ -41,7 +42,11 @@ class SpreadAnalyzer:
         """Compute median spread over recent window (usually normal conditions)."""
         if len(self.spread_history) < 20:
             return None
-        spreads = [s for _, s in self.spread_history]
+        from .risk_controls import epoch
+        now = clock_time.time()
+        spreads = [s for ts, s in self.spread_history if 0 <= now - epoch(ts) <= self.lookback_minutes * 60]
+        if len(spreads) < 20:
+            return None
         return float(np.median(spreads))
     
     def check_spread(self, current_spread: float) -> Tuple[bool, Optional[str]]:

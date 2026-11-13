@@ -23,6 +23,7 @@ from src.config import get_config
 from src.persistence import PersistenceManager
 from src.mt5_connector import MT5Connector
 from src.executor import AutoTrader
+from src.calendar_feed import CalendarRefresher
 
 app = Flask(__name__)
 
@@ -40,6 +41,7 @@ auto_take_profit = {
 auto_tp_lock = threading.Lock()
 auto_tp_stop = threading.Event()
 auto_tp_thread = None
+calendar_refresher = CalendarRefresher(get_config().get('news',{}))
 
 
 def _account_currency():
@@ -124,7 +126,7 @@ def init_live_stream():
             'alert_level': signal.alert_level,
             'alert_color': signal.alert_color,
             'target_pips': int(sanitize(signal.target_pips)),
-            'success_rate': sanitize(signal.success_rate),
+            'success_rate': None,
             
             # Risk Management Data
             'entry_price': sanitize(signal.entry_price),
@@ -159,7 +161,7 @@ def init_live_stream():
             if print_signal_alerts:
                 alert_emoji = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}.get(signal.alert_level, '⭕')
                 print(f"🎯 {signal.signal_type} SIGNAL: ${signal.current_price:.2f} | {alert_emoji} {signal.alert_level} ALERT")
-                print(f"   Target: {signal.target_pips} pips | Success Rate: {signal.success_rate:.1f}% | Confidence: {signal.confidence:.1f}%")
+                print(f"   Target distance: {signal.target_pips} | Alignment score: {signal.confidence:.1f}/100 | Win rate: unmeasured")
     
     # Create and start live stream with REAL market data
     cfg = get_config()
@@ -213,6 +215,7 @@ def stop_live_streams(join_timeout: float = 10.0):
 def start_background_monitors():
     """Start process-level monitors exactly once."""
     global auto_tp_thread
+    calendar_refresher.start()
     if auto_tp_thread and auto_tp_thread.is_alive():
         return auto_tp_thread
     auto_tp_stop.clear()
@@ -229,6 +232,7 @@ def start_background_monitors():
 def stop_background_monitors(join_timeout: float = 10.0):
     """Ask process-level monitors to stop and wait for them."""
     auto_tp_stop.set()
+    calendar_refresher.stop(timeout=join_timeout)
     if auto_tp_thread and auto_tp_thread.is_alive():
         auto_tp_thread.join(timeout=join_timeout)
 
@@ -296,6 +300,7 @@ def get_status():
     stream = streams.get(sym)
     if stream:
         st = stream.get_status()
+        st['calendar_refresh'] = dict(calendar_refresher.status)
         st['dashboard_status'] = 'running'
         st['real_data'] = 'active'
         st['symbol'] = sym

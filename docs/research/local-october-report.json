@@ -1,0 +1,24 @@
+{
+  "database": "C:\\Users\\ndlal\\GetRichFrBot\\data\\trades.sqlite",
+  "since": "2026-10-01T00:00:00Z",
+  "warning": "Recorded subset only. Legacy P&L may omit costs. Unknown outcomes and duplicate tickets prevent a whole-account profitability conclusion. No account-return percentage is inferred.",
+  "latest_trade": null,
+  "duplicate_tickets": 0,
+  "overall": {
+    "records": 0,
+    "closed": 0,
+    "known_outcomes": 0,
+    "missing_closed_outcomes": 0,
+    "wins": 0,
+    "losses": 0,
+    "flat": 0,
+    "win_rate_known_pct": null,
+    "recorded_pnl": null,
+    "mean_pnl_known": null,
+    "mean_win": null,
+    "mean_loss": null,
+    "profit_factor_known": null,
+    "all_known_outcomes_positive": false
+  },
+  "engines": {}
+}

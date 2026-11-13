@@ -1,5 +1,7 @@
 from typing import Optional, Dict
 import math
+from .runtime_logging import emit
+from .risk_controls import execution_snapshot, money_at_stop, floor_volume, ACKNOWLEDGED_ORDERS, usd_account_rate
 
 try:
 	import MetaTrader5 as mt5
@@ -15,6 +17,9 @@ class AutoTrader:
 		self.cfg = get_config()
 		self.symbol = symbol
 		self.enabled = self.cfg.get('execution', {}).get('enabled', False)
+		self.market_context = {}
+		self.last_rejection = None
+		self.last_outcome = None
 
 	def _symbol_info(self):
 		info = mt5.symbol_info(self.symbol)
@@ -75,110 +80,69 @@ class AutoTrader:
 			return f"{base}_{tag[:13]}"
 		return base
 
-	def _max_affordable_lot(self, order_type: int, entry: float, info) -> float:
-		"""Compute the largest lot size affordable by current free margin, honoring lot grid.
-
-		Returns 0.0 if even the broker-minimum lot is unaffordable.
-		"""
-		try:
-			acc = self._account_info()
-			if not acc:
-				return 0.0
-			free_margin = float(getattr(acc, 'margin_free', 0.0) or 0.0)
-			min_lot = float(info.volume_min)
-			max_lot = float(info.volume_max)
-			lot_step = float(info.volume_step or 0.01)
-			if free_margin <= 0:
-				return 0.0
-			# If minimum lot fits, binary-search up to the maximum affordable
-			def fits(lots: float) -> bool:
-				m = mt5.order_calc_margin(order_type, self.symbol, lots, entry)
-				if m is None:
-					return False
-				return float(m) <= free_margin * 0.95
-			# Early reject: min lot unaffordable
-			if not fits(min_lot):
-				return 0.0
-			lo = min_lot
-			hi = max(min(max_lot, min_lot * 100), min_lot)  # cap search space
-			best = min_lot
-			# Binary search 20 iters max
-			for _ in range(20):
-				mid = (lo + hi) / 2.0
-				# Align to lot_step grid
-				steps = max(0, int(round((mid - min_lot) / (lot_step or 0.01))))
-				mid_aligned = round(min_lot + steps * lot_step, 2)
-				if mid_aligned < min_lot:
-					mid_aligned = min_lot
-				if fits(mid_aligned):
-					best = mid_aligned
-					lo = mid_aligned + lot_step
-				else:
-					hi = max(min_lot, mid_aligned - lot_step)
-			return round(best, 2)
-		except Exception:
+	def _max_affordable_lot(self, order_type, entry, info, maximum):
+		"""Fit only the proposed risk-sized volume; avoid unnecessary IPC calls."""
+		account = self._account_info()
+		if account is None:
 			return 0.0
-
-	def _calc_lot(self, entry: float, stop: float) -> float:
-		# Simple risk model: risk % of equity divided by monetary risk per lot
-		risk_pct = float(self.cfg.get('risk', {}).get('risk_percent_per_trade', 0.75)) / 100.0
-		acc = self._account_info()
-		if not acc:
+		free = float(account.margin_free) * 0.95
+		def fits(volume):
+			margin = mt5.order_calc_margin(order_type, self.symbol, volume, entry)
+			return margin is not None and math.isfinite(margin) and 0 <= margin <= free
+		maximum = floor_volume(maximum, info)
+		if maximum and fits(maximum):
+			return maximum
+		minimum, step = float(info.volume_min), float(info.volume_step)
+		if maximum < minimum or not fits(minimum):
 			return 0.0
-		equity = float(acc.equity)
-		risk_amount = equity * risk_pct
-		info = self._symbol_info()
-		if not info:
-			return 0.0
-		point = float(info.point)
-		contract_size = float(getattr(info, 'trade_contract_size', 100))
-		# approximate tick value per lot
-		tick_value = float(getattr(info, 'trade_tick_value', 1.0))
-		tick_size = float(getattr(info, 'trade_tick_size', point))
-		price_risk = abs(entry - stop)
-		if price_risk <= 0:
-			return 0.0
-		# monetary risk per lot approximated via tick value ratio
-		monetary_risk_per_lot = (price_risk / (tick_size or point)) * (tick_value or 1.0)
-		if monetary_risk_per_lot <= 0:
-			return 0.0
-		lots = risk_amount / monetary_risk_per_lot
-		# clamp to broker min/step
-		min_lot = float(info.volume_min)
-		lot_step = float(info.volume_step)
-		max_lot = float(info.volume_max)
-		lots = max(min_lot, min(max_lot, math.floor(lots / lot_step) * lot_step))
-		return round(lots, 2)
+		low, high, best = 0, int(round((maximum-minimum)/step)), minimum
+		while low <= high:
+			mid = (low+high)//2
+			volume = round(minimum+mid*step, 8)
+			if fits(volume):
+				best, low = volume, mid+1
+			else:
+				high = mid-1
+		return best
 
 	def place_market_order(self, direction: int, entry: float, sl: float, tp: float, strategy_tag: Optional[str] = None) -> Optional[Dict]:
 		# Serialize quote, sizing, and order_send as one MT5 operation. This
 		# prevents another stream or dashboard poll from interrupting it.
 		with MT5_API_LOCK:
-			return self._place_market_order_locked(direction, entry, sl, tp, strategy_tag)
+			try:
+				self.last_rejection = None
+				self.last_outcome = None
+				return self._place_market_order_locked(direction, entry, sl, tp, strategy_tag)
+			except Exception as exc:
+				self.last_rejection = str(exc)
+				self.last_outcome = 'blocked' if isinstance(exc, ValueError) else 'error'
+				emit(f"ORDER BLOCKED: symbol={self.symbol} strategy={strategy_tag} reason={exc}", flush=True)
+				return None
 
 	def _place_market_order_locked(self, direction: int, entry: float, sl: float, tp: float, strategy_tag: Optional[str] = None) -> Optional[Dict]:
 		if not self.enabled or mt5 is None:
-			return None
+			raise ValueError('EXECUTOR_UNAVAILABLE')
 		info = self._symbol_info()
 		if not info:
-			return None
+			raise ValueError('SYMBOL_UNAVAILABLE')
 		tick = self._symbol_tick()
 		if not tick:
-			print(f"⏸️ Skip {self.symbol}: no live tick available")
-			return None
+			raise ValueError('QUOTE_UNAVAILABLE')
 
 		# Use current market price, not the strategy's estimated entry.
 		market_price = float(tick.ask if direction == 1 else tick.bid)
-		lots = self._calc_lot(entry, sl)
-		if lots <= 0:
-			print(f"⏸️ Skip {self.symbol}: risk sizing produced non-positive lots")
-			return None
+		if direction not in (1, -1) or not all(math.isfinite(float(v)) and float(v) > 0 for v in (entry, sl, tp)):
+			raise ValueError('INVALID_ORDER_LEVELS')
+		account = self._account_info()
+		needs_conversion = (strategy_tag or '').startswith('FARMER') or float(self.cfg.get('risk', {}).get('cost_buffer_dollars', 0)) > 0
+		usd_rate = usd_account_rate(mt5, account) if needs_conversion and account is not None else 1.0
+		budget, farmer = execution_snapshot(mt5, self.cfg, self.symbol, self.market_context, tick, account, strategy_tag or '', usd_rate=usd_rate)
 		order_type = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
 		# --- Normalize SL/TP to broker constraints and tick grid ---
 		try:
 			point = float(getattr(info, 'point', 0.01) or 0.01)
 			tick_size = self._tick_size(info)
-			stops_level_points = float(getattr(info, 'stops_level', 0) or 0)
+			stops_level_points = float(getattr(info, 'trade_stops_level', 0) or 0)
 			min_distance = stops_level_points * point
 			# Align price to the broker's exact grid
 			def align_to_grid(price: float) -> float:
@@ -186,45 +150,99 @@ class AutoTrader:
 			# Enforce min distance and proper side for SL/TP
 			if direction == 1:
 				# BUY: SL below, TP above
-				if min_distance > 0:
-					sl = min(sl, market_price - min_distance)
-					tp = max(tp, market_price + min_distance)
+				if market_price - sl < min_distance:
+					raise ValueError('STOP_TOO_CLOSE')
 				# Ensure strictly on correct sides
 				if not (sl < market_price and tp > market_price):
-					return None
+					raise ValueError('STOP_OR_TARGET_WRONG_SIDE')
 			else:
 				# SELL: SL above, TP below
-				if min_distance > 0:
-					sl = max(sl, market_price + min_distance)
-					tp = min(tp, market_price - min_distance)
+				if sl - market_price < min_distance:
+					raise ValueError('STOP_TOO_CLOSE')
 				if not (sl > market_price and tp < market_price):
-					return None
+					raise ValueError('STOP_OR_TARGET_WRONG_SIDE')
 			# Align to tick grid
 			market_price = align_to_grid(market_price)
 			sl = align_to_grid(sl)
 			tp = align_to_grid(tp)
-		except Exception:
-			pass
+		except Exception as exc:
+			raise ValueError(f'INVALID_BROKER_LEVELS:{exc}') from exc
+		# Size only AFTER live-price and tick-grid normalization; never round up.
+		fc = self.cfg.get('execution', {}).get('farmer', {})
+		cost_buffer = (float(fc.get('estimated_round_trip_cost_dollars', 0.15)) if farmer else float(self.cfg.get('risk', {}).get('cost_buffer_dollars', 0.0))) * usd_rate
+		unit_loss = money_at_stop(mt5, self.symbol, order_type, float(info.volume_min), market_price, sl)
+		if unit_loss <= 0:
+			raise ValueError('INVALID_STOP_RISK')
+		lots = floor_volume((budget - cost_buffer) / unit_loss * float(info.volume_min), info)
+		if lots <= 0:
+			raise ValueError(f'MINIMUM_LOT_EXCEEDS_RISK:currency={account.currency} budget={budget:.2f} minimum_lot={info.volume_min} stop_loss={unit_loss:.2f} costs={cost_buffer:.2f} required={unit_loss+cost_buffer:.2f}')
 		# Margin-aware lot fit: cap by maximum affordable
-		affordable = self._max_affordable_lot(order_type, market_price, info)
+		affordable = self._max_affordable_lot(order_type, market_price, info, lots)
 		min_lot = float(info.volume_min)
 		lot_step = float(info.volume_step or 0.01)
 		if affordable <= 0.0:
 			# Even min lot unaffordable -> skip
-			print(f"⏸️ Skip {self.symbol}: insufficient free margin for broker minimum lot {min_lot}")
-			return None
+			raise ValueError('INSUFFICIENT_MARGIN_FOR_MINIMUM_LOT')
 		# Take the minimum of risk-lot and affordable lot
 		if lots > affordable:
 			original_lots = lots
 			lots = affordable
-			print(f"🔽 Downscale {self.symbol}: lots {original_lots} -> {lots} due to margin")
+			emit(f" Downscale {self.symbol}: lots {original_lots} -> {lots} due to margin")
 		# Align to lot grid
-		steps = max(0, int(round((lots - min_lot) / (lot_step or 0.01))))
-		lots = round(min_lot + steps * lot_step, 2)
+		lots = floor_volume(lots, info)
 		if lots < min_lot:
-			print(f"⏸️ Skip {self.symbol}: aligned lot {lots} < broker minimum {min_lot}")
-			return None
+			raise ValueError('VOLUME_BELOW_MINIMUM')
 
+		stop_risk = money_at_stop(mt5, self.symbol, order_type, lots, market_price, sl)
+		if stop_risk + cost_buffer > budget + 1e-8:
+			raise ValueError('FINAL_RISK_EXCEEDS_BUDGET')
+		if farmer:
+			# Convert USD target into account P&L before deriving a price.
+			target = float(fc.get('target_profit_dollars', 2.0)) * usd_rate
+			per_tick = mt5.order_calc_profit(order_type, self.symbol, lots, market_price, market_price + direction * self._tick_size(info))
+			if per_tick is None or per_tick <= 0:
+				raise ValueError('TARGET_CALCULATION_UNAVAILABLE')
+			tp = self._align_price(market_price + direction * math.ceil((target + cost_buffer) / per_tick) * self._tick_size(info), info)
+			reward = mt5.order_calc_profit(order_type, self.symbol, lots, market_price, tp)
+			spread_cost = money_at_stop(mt5, self.symbol, order_type, lots, float(tick.ask if direction == 1 else tick.bid), float(tick.bid if direction == 1 else tick.ask))
+			if reward is None or reward - cost_buffer < stop_risk * float(fc.get('min_net_reward_risk', 1.0)):
+				raise ValueError('FARMER_REWARD_TOO_SMALL')
+			if spread_cost + cost_buffer > target * float(fc.get('max_cost_target_fraction', 0.25)):
+				raise ValueError('FARMER_COST_TOO_HIGH')
+		if (sl - market_price) * direction >= 0 or (tp - market_price) * direction <= 0 or min(abs(market_price-sl), abs(tp-market_price)) < min_distance:
+			raise ValueError('FINAL_LEVELS_INVALID')
+		from datetime import datetime, timezone
+		from .risk_controls import epoch
+		final_tick = self._symbol_tick()
+		now = datetime.now(timezone.utc).timestamp()
+		max_age = float(self.cfg.get('execution', {}).get('max_quote_age_seconds', 15))
+		if not final_tick or not -2 <= now-float(final_tick.time) <= max_age or now-epoch(self.market_context['timestamp']) > max_age:
+			raise ValueError('QUOTE_EXPIRED_DURING_CHECKS')
+		final_price = float(final_tick.ask if direction == 1 else final_tick.bid)
+		drift_cap = float(self.cfg.get('execution', {}).get('max_entry_drift_points', 50)) * float(info.point)
+		if not all(math.isfinite(float(v)) and float(v) > 0 for v in (final_tick.bid, final_tick.ask)) or final_tick.ask < final_tick.bid or abs(final_price-market_price) > drift_cap:
+			raise ValueError('QUOTE_MOVED_DURING_CHECKS')
+		final_spread = (final_tick.ask-final_tick.bid) / info.point
+		if final_spread > float(self.cfg.get('filters', {}).get('max_spread_points', 40)):
+			raise ValueError('SPREAD_CAP')
+		normal = self.market_context.get('normal_spread_points')
+		if normal and final_spread > normal * float(self.cfg.get('filters', {}).get('spread_spike_multiplier', 2)):
+			raise ValueError('SPREAD_SPIKE')
+		final_price = self._align_price(final_price, info)
+		if farmer:
+			tp = self._align_price(tp + final_price-market_price, info)
+		market_price, tick = final_price, final_tick
+		final_risk = money_at_stop(mt5, self.symbol, order_type, lots, market_price, sl) + cost_buffer
+		if final_risk > budget + 1e-8:
+			raise ValueError('FINAL_RISK_EXCEEDS_BUDGET')
+		if (sl-market_price)*direction >= 0 or (tp-market_price)*direction <= 0 or min(abs(sl-market_price),abs(tp-market_price)) < min_distance:
+			raise ValueError('FINAL_LEVELS_INVALID')
+		if farmer:
+			gross = mt5.order_calc_profit(order_type,self.symbol,lots,market_price,tp)
+			final_spread_cost = money_at_stop(mt5,self.symbol,order_type,lots,tick.ask if direction==1 else tick.bid,tick.bid if direction==1 else tick.ask)
+			if gross is None or gross-cost_buffer < max(target,(final_risk-cost_buffer)*float(fc.get('min_net_reward_risk',1))) - 1e-8 or final_spread_cost+cost_buffer > target*float(fc.get('max_cost_target_fraction',.25)):
+				raise ValueError('FARMER_FINAL_ECONOMICS_CHANGED')
+		stop_risk = final_risk-cost_buffer
 		comment = self._order_comment(strategy_tag)
 		request = {
 			"action": mt5.TRADE_ACTION_DEAL,
@@ -240,25 +258,36 @@ class AutoTrader:
 			"type_filling": mt5.ORDER_FILLING_IOC,
 		}
 		result = mt5.order_send(request)
-		if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-			print(
+		if result and result.retcode in (mt5.TRADE_RETCODE_DONE, getattr(mt5, 'TRADE_RETCODE_DONE_PARTIAL', 10010)):
+			lots = min(lots, float(getattr(result, 'volume', lots)))
+			self.last_outcome = 'filled'
+			ACKNOWLEDGED_ORDERS[(account.login, result.order)] = {'volume': lots, 'risk': stop_risk + cost_buffer, 'cost_buffer': cost_buffer, 'symbol': self.symbol, 'strategy': strategy_tag or '', 'deal': getattr(result, 'deal', None)}
+			emit(
 				f"ORDER OPEN SENT [DONE]: ticket={result.order} symbol={self.symbol} volume={lots} open_price={getattr(result,'price', None)} sl={sl} tp={tp}" + (f" strategy={strategy_tag}" if strategy_tag else ""),
 				flush=True
 			)
 			return {
 				"ticket": result.order,
 				"open_deal_id": getattr(result, "deal", None),
+				"bid": float(tick.bid),
+				"ask": float(tick.ask),
+				"point": float(info.point),
+				"spread_points": (tick.ask-tick.bid)/info.point,
 				"volume": lots,
 				"price": result.price,
+				"sl": sl,
+				"tp": tp,
 				"magic": request["magic"],
 				"order_comment": comment,
 			}
+		self.last_outcome = 'rejected'
+		self.last_rejection = f"BROKER_REJECTED:retcode={getattr(result,'retcode',None)} comment={getattr(result,'comment',None)}"
 		# Failed open attempt
 		try:
 			mt5_error = mt5.last_error()
 		except Exception:
 			mt5_error = None
-		print(
+		emit(
 			f"ORDER OPEN SENT [FAILED]: symbol={self.symbol} volume={lots} open_price={market_price} sl={sl} tp={tp} retcode={getattr(result,'retcode', None)} result_comment={getattr(result,'comment', None)} request_id={getattr(result,'request_id', None)} deal={getattr(result,'deal', None)} order={getattr(result,'order', None)} mt5_error={mt5_error}" + (f" strategy={strategy_tag}" if strategy_tag else ""),
 			flush=True
 		)
@@ -295,12 +324,12 @@ class AutoTrader:
 
 	def _close_position_locked(self, ticket: int) -> bool:
 		if mt5 is None:
-			print(f"ORDER CLOSE FAILED [mt5_not_available]: ticket={ticket}", flush=True)
+			emit(f"ORDER CLOSE FAILED [mt5_not_available]: ticket={ticket}", flush=True)
 			return False
 		try:
 			pos = next((p for p in mt5.positions_get() or [] if p.ticket == ticket), None)
 			if not pos:
-				print(f"ORDER CLOSE FAILED [position_not_found]: ticket={ticket}", flush=True)
+				emit(f"ORDER CLOSE FAILED [position_not_found]: ticket={ticket}", flush=True)
 				return False
 
 			price = None
@@ -322,13 +351,14 @@ class AutoTrader:
 				"deviation": int(self.cfg.get('execution', {}).get('deviation_points', 30)),
 				"magic": 20250923,
 				"comment": "Close position",
+				"type_filling": mt5.ORDER_FILLING_IOC,
 			}
 
 			result = mt5.order_send(request)
 			ok = bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
 
 			if ok:
-				print(
+				emit(
 					f"ORDER CLOSE SENT [DONE]: ticket={ticket} symbol={pos.symbol} volume={pos.volume} close_price={getattr(result,'price', None)}",
 					flush=True
 				)
@@ -337,12 +367,12 @@ class AutoTrader:
 					mt5_error = mt5.last_error()
 				except Exception:
 					mt5_error = None
-				print(
+				emit(
 					f"ORDER CLOSE SENT [FAILED]: ticket={ticket} symbol={pos.symbol} volume={pos.volume} retcode={getattr(result,'retcode', None)} mt5_error={mt5_error}",
 					flush=True
 				)
 
 			return ok
 		except Exception as e:
-			print(f"ORDER CLOSE FAILED [exception]: ticket={ticket} error={e}", flush=True)
+			emit(f"ORDER CLOSE FAILED [exception]: ticket={ticket} error={e}", flush=True)
 			return False
