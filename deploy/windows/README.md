@@ -7,10 +7,15 @@ restart it after a crash or reboot. It expects the repository to contain a
 From an elevated PowerShell window in the repository:
 
 ```powershell
-python -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\deploy\windows\install_bot_task.ps1 -StartNow
 ```
+
+If Python reports `No module named 'encodings'`, the existing virtual
+environment may be stale or copied from another machine. Rename or remove
+`.venv`, then recreate it with the globally installed Python launcher (`py`),
+not the broken environment's `python` command.
 
 The task runs under the Windows account supplied during installation. Use the
 same account that owns or can start the MetaTrader 5 terminal. The launcher
@@ -27,6 +32,9 @@ Invoke-WebRequest http://127.0.0.1:5000/api/health
 The health endpoint returns HTTP 200 only after the streams are running and
 have produced a recent market update. It returns HTTP 503 while starting or
 when the stream is stale.
+The URL above assumes the default `BOT_HOST=127.0.0.1`. If `BOT_HOST` is set
+to the VM's Tailscale IP below, use that IP in the health-check URL instead;
+the server binds only to the configured address.
 
 ## SQLite trade history
 

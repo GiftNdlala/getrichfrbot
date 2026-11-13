@@ -6,6 +6,7 @@ __pycache__/
 logs/
 data/trades.sqlite
 .venv/
+<<<<<<< HEAD
 
 # Reproducible environments and JavaScript dependencies
 venv/
@@ -17,3 +18,6 @@ node_modules/
 data/news_calendar.json
 
 data/backups/
+=======
+venv/
+>>>>>>> main
