@@ -32,6 +32,9 @@ Invoke-WebRequest http://127.0.0.1:5000/api/health
 The health endpoint returns HTTP 200 only after the streams are running and
 have produced a recent market update. It returns HTTP 503 while starting or
 when the stream is stale.
+The URL above assumes the default `BOT_HOST=127.0.0.1`. If `BOT_HOST` is set
+to the VM's Tailscale IP below, use that IP in the health-check URL instead;
+the server binds only to the configured address.
 
 ## SQLite trade history
 
